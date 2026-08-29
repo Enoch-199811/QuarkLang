@@ -1,6 +1,6 @@
 # QuarkLang
 
-一门以「函数调用可观测」为核心的语言：每次函数调用产出 **FuncBuffer**（head 参数 / tail 结果 / log 日志），`@` **签名**（Sign 接口）对调用做第二层包装；**List 是双指针滚动缓冲**（`*` 取开头、`next()` 滚动、耗尽报错）；语言默认**严格检查**，出错时回放 log 定位「为什么运行错了」。
+一门以「函数调用可观测」为核心的语言：每次函数调用产出 **FuncBuffer**（head 参数 / tail 结果 / log 日志），`@` **签名**（Sign 接口）对调用做第二层包装；**List 是双指针滚动缓冲**（`*` 取开头、`next()` 滚动、耗尽报错）；语言默认**严格检查**，出错时回放 log 定位「为什么运行错了」。定位：**CLI 工具的语言**。
 
 ## 特性
 
@@ -34,14 +34,25 @@ go test ./internal/lang/       # 29 项测试（go test -race 同样可跑）
 
 ## 布局
 
-- `docs/spec.md` —— 语言设计文档（权威来源，随设计迭代）
 - `main.go` —— CLI 入口：`quark <file.qk> [args...]`
 - `internal/lang/` —— lexer / parser / typecheck / eval / runtime
 - `examples/` —— 示例程序
 
+## 分支
+
+| 分支 | 内容 |
+|---|---|
+| `main` | 集成分支（interpreter + examples 的合并结果） |
+| `interpreter` | 解释器实现（lexer/parser/typecheck/eval/runtime） |
+| `compiler` | 编译器（占位，待开始） |
+| `examples` | 示例程序 |
+| `docs` | 语言设计文档（独立维护，**不并入 main**） |
+
+语言设计文档见 [docs 分支的 docs/spec.md](https://github.com/Enoch-199811/QuarkLang/blob/docs/docs/spec.md)（权威来源，随设计迭代）。
+
 ## 状态
 
-v0.1 解释器已完成：滚动 List、FuncBuffer、@memorize / @async 签名、out 多返回值、main(io/env/args)、IO 重定向与执行表、协程系统、编译期静态类型检查（29 项测试全绿）。待实现见 `docs/spec.md` §15：用户自定义 struct/impl/interface、Copyd<T> 的 .ptr()、block 内存系统。
+v0.1 解释器已完成：滚动 List、FuncBuffer、@memorize / @async 签名、out 多返回值、main(io/env/args)、IO 重定向与执行表、协程系统、编译期静态类型检查（29 项测试全绿）。待实现见 docs 分支 spec §15：用户自定义 struct/impl/interface、Copyd<T> 的 .ptr()、block 内存系统。
 
 ## 许可证
 

@@ -8,13 +8,19 @@ type Pos struct {
 
 // Program is a parsed QuarkLang program.
 type Program struct {
-	Funcs []*FuncDecl
+	Funcs      []*FuncDecl
+	Structs    []*StructDecl
+	Interfaces []*InterfaceDecl
+	Impls      []*ImplDecl
 }
 
-// FuncDecl is a top-level function declaration.
+// FuncDecl is a top-level function declaration. Ret is the optional return
+// type annotation: functions WITHOUT Ret yield a FuncBuffer (out -> tail),
+// functions WITH Ret yield the value of `return expr;` directly.
 type FuncDecl struct {
 	Name   string
 	Params []Param
+	Ret    string
 	Body   *Block
 	Pos    Pos
 }
@@ -24,6 +30,43 @@ type Param struct {
 	Name string
 	Type string
 	Pos  Pos
+}
+
+// Member is a struct member declaration ("name Type;").
+type Member struct {
+	Name string
+	Type string
+	Pos  Pos
+}
+
+// StructDecl is a struct declaration: "struct { ... } Name;".
+type StructDecl struct {
+	Name    string
+	Members []Member
+	Pos     Pos
+}
+
+// MethodSig is an interface method signature (no body).
+type MethodSig struct {
+	Name   string
+	Params []Param
+	Ret    string
+	Pos    Pos
+}
+
+// InterfaceDecl is an interface declaration.
+type InterfaceDecl struct {
+	Name    string
+	Methods []MethodSig
+	Pos     Pos
+}
+
+// ImplDecl is an impl declaration: "impl [Iface] { funcs } Type;".
+type ImplDecl struct {
+	Iface   string
+	Type    string
+	Methods []*FuncDecl
+	Pos     Pos
 }
 
 // Block is a brace-delimited statement list.
@@ -46,7 +89,10 @@ type LogStmt struct {
 	Pos Pos
 }
 type YieldStmt struct{ Pos Pos }
-type ReturnStmt struct{ X Expr } // nil X = bare return
+type ReturnStmt struct {
+	X   Expr // nil X = bare return
+	Pos Pos
+}
 type IfStmt struct {
 	Cond Expr
 	Then *Block

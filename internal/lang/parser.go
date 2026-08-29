@@ -97,10 +97,26 @@ func (p *parser) parseProgram() (*Program, error) {
 				return nil, err
 			}
 			prog.Funcs = append(prog.Funcs, fn)
-		case TStruct, TImpl, TInterface:
-			return nil, p.errf(p.cur(), "%s declarations are not supported by the v0.1 interpreter yet (use the built-in memorize)", p.cur().Kind)
+		case TStruct:
+			sd, err := p.parseStruct()
+			if err != nil {
+				return nil, err
+			}
+			prog.Structs = append(prog.Structs, sd)
+		case TInterface:
+			id, err := p.parseInterface()
+			if err != nil {
+				return nil, err
+			}
+			prog.Interfaces = append(prog.Interfaces, id)
+		case TImpl:
+			im, err := p.parseImpl()
+			if err != nil {
+				return nil, err
+			}
+			prog.Impls = append(prog.Impls, im)
 		default:
-			return nil, p.errf(p.cur(), "expected a top-level declaration (func), got %s", p.cur().Kind)
+			return nil, p.errf(p.cur(), "expected a top-level declaration (func/struct/impl/interface), got %s", p.cur().Kind)
 		}
 	}
 	return prog, nil
@@ -119,17 +135,45 @@ func (p *parser) parseFunc() (*FuncDecl, error) {
 		return nil, err
 	}
 	fn := &FuncDecl{Name: name.Text, Pos: Pos{Line: kw.Line, Col: kw.Col}}
+	params, err := p.parseParamList()
+	if err != nil {
+		return nil, err
+	}
+	fn.Params = params
+	// 可选返回类型注解：func f(...) T { ... }
+	if p.curIs(TIdent) || p.curIs(TInterface) {
+		typ, err := p.parseType()
+		if err != nil {
+			return nil, err
+		}
+		fn.Ret = typ
+	}
+	body, err := p.parseBlock()
+	if err != nil {
+		return nil, err
+	}
+	fn.Body = body
+	return fn, nil
+}
+
+// parseParamList parses "(name Type, ...)".
+func (p *parser) parseParamList() ([]Param, error) {
+	var params []Param
 	if !p.curIs(TRParen) {
 		for {
 			ptok, err := p.expectIdent("parameter name")
 			if err != nil {
 				return nil, err
 			}
-			typ, err := p.parseType()
-			if err != nil {
-				return nil, err
+			typ := ""
+			if !p.curIs(TComma) && !p.curIs(TRParen) {
+				t, err := p.parseType()
+				if err != nil {
+					return nil, err
+				}
+				typ = t
 			}
-			fn.Params = append(fn.Params, Param{
+			params = append(params, Param{
 				Name: ptok.Text,
 				Type: typ,
 				Pos:  Pos{Line: ptok.Line, Col: ptok.Col},
@@ -144,12 +188,161 @@ func (p *parser) parseFunc() (*FuncDecl, error) {
 	if _, err := p.expect(TRParen, "')'"); err != nil {
 		return nil, err
 	}
-	body, err := p.parseBlock()
+	return params, nil
+}
+
+// parseStruct parses "struct { members } [Name];".
+func (p *parser) parseStruct() (*StructDecl, error) {
+	kw, err := p.expect(TStruct, "'struct'")
 	if err != nil {
 		return nil, err
 	}
-	fn.Body = body
-	return fn, nil
+	if _, err := p.expect(TLBrace, "'{"); err != nil {
+		return nil, err
+	}
+	sd := &StructDecl{Pos: Pos{Line: kw.Line, Col: kw.Col}}
+	for !p.curIs(TRBrace) {
+		if p.curIs(TEOF) {
+			return nil, p.errf(p.cur(), "unterminated struct body (missing '}')")
+		}
+		name, err := p.expectIdent("member name")
+		if err != nil {
+			return nil, err
+		}
+		typ, err := p.parseType()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(TSemi, "';'"); err != nil {
+			return nil, err
+		}
+		sd.Members = append(sd.Members, Member{
+			Name: name.Text,
+			Type: typ,
+			Pos:  Pos{Line: name.Line, Col: name.Col},
+		})
+	}
+	p.advance() // '}'
+	if p.curIs(TIdent) {
+		sd.Name = p.advance().Text
+	}
+	if _, err := p.expect(TSemi, "';'"); err != nil {
+		return nil, err
+	}
+	return sd, nil
+}
+
+// parseMethodSig parses an interface method signature: "func name(params) Ret;".
+func (p *parser) parseMethodSig() (MethodSig, error) {
+	kw, err := p.expect(TFunc, "'func'")
+	if err != nil {
+		return MethodSig{}, err
+	}
+	name, err := p.expectIdent("method name")
+	if err != nil {
+		return MethodSig{}, err
+	}
+	if _, err := p.expect(TLParen, "'('"); err != nil {
+		return MethodSig{}, err
+	}
+	params, err := p.parseParamList()
+	if err != nil {
+		return MethodSig{}, err
+	}
+	sig := MethodSig{Name: name.Text, Params: params, Pos: Pos{Line: kw.Line, Col: kw.Col}}
+	if p.curIs(TIdent) || p.curIs(TInterface) {
+		typ, err := p.parseType()
+		if err != nil {
+			return MethodSig{}, err
+		}
+		sig.Ret = typ
+	}
+	if _, err := p.expect(TSemi, "';'"); err != nil {
+		return MethodSig{}, err
+	}
+	return sig, nil
+}
+
+// parseInterface parses "interface { sigs } [Name<...>];".
+func (p *parser) parseInterface() (*InterfaceDecl, error) {
+	kw, err := p.expect(TInterface, "'interface'")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(TLBrace, "'{"); err != nil {
+		return nil, err
+	}
+	id := &InterfaceDecl{Pos: Pos{Line: kw.Line, Col: kw.Col}}
+	for !p.curIs(TRBrace) {
+		if p.curIs(TEOF) {
+			return nil, p.errf(p.cur(), "unterminated interface body (missing '}')")
+		}
+		sig, err := p.parseMethodSig()
+		if err != nil {
+			return nil, err
+		}
+		id.Methods = append(id.Methods, sig)
+	}
+	p.advance() // '}'
+	if p.curIs(TIdent) {
+		id.Name = p.advance().Text
+		// 泛型接口参数：Sign<P> —— 平衡跳过
+		if p.curIs(TLt) {
+			p.advance()
+			depth := 1
+			for depth > 0 {
+				if p.curIs(TEOF) {
+					return nil, p.errf(p.cur(), "unterminated interface type parameters")
+				}
+				if p.curIs(TLt) {
+					depth++
+				}
+				if p.curIs(TGt) {
+					depth--
+				}
+				p.advance()
+			}
+		}
+	}
+	if _, err := p.expect(TSemi, "';'"); err != nil {
+		return nil, err
+	}
+	return id, nil
+}
+
+// parseImpl parses "impl [Iface] { funcs } Type;".
+func (p *parser) parseImpl() (*ImplDecl, error) {
+	kw, err := p.expect(TImpl, "'impl'")
+	if err != nil {
+		return nil, err
+	}
+	im := &ImplDecl{Pos: Pos{Line: kw.Line, Col: kw.Col}}
+	if p.curIs(TIdent) {
+		im.Iface = p.advance().Text
+	}
+	if _, err := p.expect(TLBrace, "'{"); err != nil {
+		return nil, err
+	}
+	for !p.curIs(TRBrace) {
+		if p.curIs(TEOF) {
+			return nil, p.errf(p.cur(), "unterminated impl body (missing '}')")
+		}
+		fn, err := p.parseFunc()
+		if err != nil {
+			return nil, err
+		}
+		im.Methods = append(im.Methods, fn)
+	}
+	p.advance() // '}'
+	typ, err := p.expectIdent("type name")
+	if err != nil {
+		return nil, err
+	}
+	im.Type = typ.Text
+	if _, err := p.expect(TSemi, "';'"); err != nil {
+		return nil, err
+	}
+	return im, nil
 }
 
 // parseType reads a type annotation: ident ( "<" ... ">" )* ( "[" ... "]" )?.
@@ -254,10 +447,11 @@ func (p *parser) parseStmt() (Stmt, error) {
 		}
 		return &YieldStmt{Pos: Pos{Line: kw.Line, Col: kw.Col}}, nil
 	case TReturn:
-		p.advance()
+		kw := p.advance()
+		pos := Pos{Line: kw.Line, Col: kw.Col}
 		if p.curIs(TSemi) {
 			p.advance()
-			return &ReturnStmt{}, nil
+			return &ReturnStmt{Pos: pos}, nil
 		}
 		x, err := p.parseExpr()
 		if err != nil {
@@ -266,7 +460,7 @@ func (p *parser) parseStmt() (Stmt, error) {
 		if _, err := p.expect(TSemi, "';'"); err != nil {
 			return nil, err
 		}
-		return &ReturnStmt{X: x}, nil
+		return &ReturnStmt{X: x, Pos: pos}, nil
 	case TIf:
 		p.advance()
 		if _, err := p.expect(TLParen, "'('"); err != nil {

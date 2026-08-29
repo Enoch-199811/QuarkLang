@@ -69,10 +69,34 @@ type signDef struct {
 
 type builtinFn func(args []Value, pos Pos, fb *FuncBuffer) (Value, error)
 
+// StructDef is a registered struct declaration.
+type StructDef struct {
+	Name  string
+	Types map[string]string // 成员名 → 类型注解
+}
+
+// InterfaceDef is a registered interface declaration.
+type InterfaceDef struct {
+	Name    string
+	Methods []MethodSig
+}
+
+// ImplDef is a registered impl block: Methods are static (no self), SelfMethods
+// take self as first parameter.
+type ImplDef struct {
+	Type        string
+	Iface       string
+	Methods     map[string]*Func
+	SelfMethods map[string]*Func
+}
+
 type interp struct {
-	fns      map[string]*Func
-	sigs     map[string]*signDef
-	builtins map[string]builtinFn
+	fns        map[string]*Func
+	sigs       map[string]*signDef
+	builtins   map[string]builtinFn
+	structs    map[string]*StructDef
+	interfaces map[string]*InterfaceDef
+	impls      map[string]*ImplDef
 }
 
 // Run executes prog. args are command-line arguments for main(); stdin/stdout
@@ -82,15 +106,60 @@ func Run(prog *Program, filename string, args []string, stdin io.Reader, stdout 
 		return err
 	}
 	in := &interp{
-		fns:      map[string]*Func{},
-		sigs:     map[string]*signDef{},
-		builtins: map[string]builtinFn{},
+		fns:        map[string]*Func{},
+		sigs:       map[string]*signDef{},
+		builtins:   map[string]builtinFn{},
+		structs:    map[string]*StructDef{},
+		interfaces: map[string]*InterfaceDef{},
+		impls:      map[string]*ImplDef{},
 	}
 	for _, f := range prog.Funcs {
 		if _, dup := in.fns[f.Name]; dup {
 			return fmt.Errorf("CompileError: duplicate function %q", f.Name)
 		}
-		in.fns[f.Name] = &Func{Name: f.Name, Params: f.Params, Body: f.Body, Pos: f.Pos}
+		in.fns[f.Name] = &Func{Name: f.Name, Params: f.Params, Ret: f.Ret, Body: f.Body, Pos: f.Pos}
+	}
+	for _, s := range prog.Structs {
+		if _, dup := in.structs[s.Name]; dup {
+			return fmt.Errorf("CompileError: duplicate struct %q", s.Name)
+		}
+		def := &StructDef{Name: s.Name, Types: map[string]string{}}
+		for _, m := range s.Members {
+			def.Types[m.Name] = m.Type
+		}
+		in.structs[s.Name] = def
+	}
+	for _, i := range prog.Interfaces {
+		if _, dup := in.interfaces[i.Name]; dup {
+			return fmt.Errorf("CompileError: duplicate interface %q", i.Name)
+		}
+		in.interfaces[i.Name] = &InterfaceDef{Name: i.Name, Methods: i.Methods}
+	}
+	for _, im := range prog.Impls {
+		def, ok := in.impls[im.Type]
+		if !ok {
+			def = &ImplDef{Type: im.Type, Iface: im.Iface, Methods: map[string]*Func{}, SelfMethods: map[string]*Func{}}
+			in.impls[im.Type] = def
+		} else if def.Iface == "" && im.Iface != "" {
+			def.Iface = im.Iface
+		}
+		for _, m := range im.Methods {
+			if len(m.Params) > 0 && m.Params[0].Name == "self" && m.Params[0].Type == "" {
+				m.Params[0].Type = im.Type
+			}
+			fn := &Func{Name: m.Name, Params: m.Params, Ret: m.Ret, Body: m.Body, Pos: m.Pos}
+			if len(m.Params) > 0 && m.Params[0].Name == "self" {
+				if _, dup := def.SelfMethods[fn.Name]; dup {
+					return fmt.Errorf("CompileError: duplicate method %q on %s", fn.Name, im.Type)
+				}
+				def.SelfMethods[fn.Name] = fn
+			} else {
+				if _, dup := def.Methods[fn.Name]; dup {
+					return fmt.Errorf("CompileError: duplicate method %q on %s", fn.Name, im.Type)
+				}
+				def.Methods[fn.Name] = fn
+			}
+		}
 	}
 	in.sigs["memorize"] = &signDef{name: "memorize", call: in.memorizeCall}
 	in.sigs["async"] = &signDef{name: "async", call: in.asyncCall}
@@ -120,6 +189,39 @@ func Run(prog *Program, filename string, args []string, stdin io.Reader, stdout 
 	}
 	fb := NewFuncBuffer(mainFn, mainArgs, mainFn.Pos)
 	return in.execute(fb)
+}
+
+// zeroInstance 构造结构体零值实例（成员按类型注解取零值）。
+func (in *interp) zeroInstance(def *StructDef) *StructValue {
+	sv := &StructValue{SType: def.Name, Fields: map[string]Value{}}
+	for name, typ := range def.Types {
+		sv.Fields[name] = in.zeroValue(typ)
+	}
+	return sv
+}
+
+// zeroValue 按类型注解生成零值。
+func (in *interp) zeroValue(typ string) Value {
+	if d, ok := in.structs[typ]; ok {
+		return in.zeroInstance(d)
+	}
+	switch typ {
+	case "int", "long", "char":
+		return IntV(0)
+	case "float", "double":
+		return FloatV(0)
+	case "String":
+		return StrV("")
+	case "bool":
+		return BoolV(false)
+	}
+	if strings.Contains(typ, "List") || strings.Contains(typ, "Array") {
+		return NewList()
+	}
+	if strings.Contains(typ, "HashTable") {
+		return NewHashTable()
+	}
+	return NilV{}
 }
 
 func envTable() *HashTable {
@@ -267,6 +369,8 @@ func (in *interp) execStmt(st Stmt, sc *scope, fb *FuncBuffer) error {
 			if err != nil {
 				return err
 			}
+		} else if def, ok := in.structs[s.Type]; ok {
+			v = in.zeroInstance(def)
 		}
 		return sc.declare(s.Name, v, s.Pos)
 	case *AssignStmt:
@@ -274,11 +378,25 @@ func (in *interp) execStmt(st Stmt, sc *scope, fb *FuncBuffer) error {
 		if err != nil {
 			return err
 		}
-		id, ok := s.Target.(*Ident)
-		if !ok {
-			return &RunError{Msg: "TypeError: unsupported assignment target (only identifiers are supported in v0.1)", Pos: s.Pos, FB: fb}
+		switch t := s.Target.(type) {
+		case *Ident:
+			return sc.set(t.Name, v, t.Pos)
+		case *MemberExpr:
+			obj, err := in.evalExpr(t.X, sc, fb)
+			if err != nil {
+				return err
+			}
+			sv, ok := obj.(*StructValue)
+			if !ok {
+				return &RunError{Msg: fmt.Sprintf("TypeError: cannot assign member of %s", obj.TypeName()), Pos: s.Pos, FB: fb}
+			}
+			if _, exists := sv.Fields[t.Name]; !exists {
+				return &RunError{Msg: fmt.Sprintf("TypeError: no member %q on %s", t.Name, sv.SType), Pos: t.Pos, FB: fb}
+			}
+			sv.Fields[t.Name] = v
+			return nil
 		}
-		return sc.set(id.Name, v, id.Pos)
+		return &RunError{Msg: "TypeError: unsupported assignment target", Pos: s.Pos, FB: fb}
 	}
 	return nil
 }
@@ -457,6 +575,12 @@ func evalMember(obj Value, name string, pos Pos, fb *FuncBuffer) (Value, error) 
 			return o.Log, nil
 		}
 	}
+	if o, ok := obj.(*StructValue); ok {
+		if v, exists := o.Fields[name]; exists {
+			return v, nil
+		}
+		return nil, &RunError{Msg: fmt.Sprintf("TypeError: no member %q on %s", name, obj.TypeName()), Pos: pos, FB: fb}
+	}
 	return nil, &RunError{Msg: fmt.Sprintf("TypeError: no member %q on %s", name, obj.TypeName()), Pos: pos, FB: fb}
 }
 
@@ -483,10 +607,6 @@ func (in *interp) evalCall(c *CallExpr, sc *scope, fb *FuncBuffer) (Value, error
 		default:
 			return nil, &RunError{Msg: "CompileError: a signature takes zero or one <Prefix> argument", Pos: c.Pos, FB: fb}
 		}
-		sd, ok := in.sigs[c.Sign.Name]
-		if !ok {
-			return nil, &RunError{Msg: fmt.Sprintf("CompileError: %q is not a registered signature (its type does not implement Sign)", c.Sign.Name), Pos: c.Pos, FB: fb}
-		}
 		argVals, err := in.evalArgs(c.Args, sc, fb)
 		if err != nil {
 			return nil, err
@@ -495,7 +615,26 @@ func (in *interp) evalCall(c *CallExpr, sc *scope, fb *FuncBuffer) (Value, error
 			return nil, &RunError{Msg: fmt.Sprintf("CompileError: %s expects %d args, got %d", fn.Name, len(fn.Params), len(argVals)), Pos: id.Pos, FB: fb}
 		}
 		nfb := NewFuncBuffer(fn, argVals, id.Pos)
-		return sd.call(prefix, nfb)
+		if sd, ok := in.sigs[c.Sign.Name]; ok {
+			return sd.call(prefix, nfb)
+		}
+		// 用户类型实现 Sign：签名名 = 类型名，必须有静态 call(prefix, fb)
+		if def, ok := in.impls[c.Sign.Name]; ok {
+			callFn, ok := def.Methods["call"]
+			if !ok {
+				return nil, &RunError{Msg: fmt.Sprintf("CompileError: type %q implements no static call — it does not implement Sign", c.Sign.Name), Pos: c.Pos, FB: fb}
+			}
+			cfb, err := in.callFunc(callFn, []Value{prefix, nfb}, c.Pos)
+			if err != nil {
+				return nil, err
+			}
+			nextFB, ok := cfb.(*FuncBuffer)
+			if !ok {
+				return nil, &RunError{Msg: "TypeError: Sign::call must return the next FuncBuffer", Pos: c.Pos, FB: fb}
+			}
+			return nextFB, nil
+		}
+		return nil, &RunError{Msg: fmt.Sprintf("CompileError: %q is not a registered signature (its type does not implement Sign)", c.Sign.Name), Pos: c.Pos, FB: fb}
 	}
 
 	// Method call: obj.name(args).
@@ -520,19 +659,37 @@ func (in *interp) evalCall(c *CallExpr, sc *scope, fb *FuncBuffer) (Value, error
 		return nil, err
 	}
 	if fn, ok := in.fns[id.Name]; ok {
-		if len(argVals) != len(fn.Params) {
-			return nil, &RunError{Msg: fmt.Sprintf("CompileError: %s expects %d args, got %d", fn.Name, len(fn.Params), len(argVals)), Pos: id.Pos, FB: fb}
-		}
-		nfb := NewFuncBuffer(fn, argVals, id.Pos)
-		if err := in.execute(nfb); err != nil {
-			return nil, err
-		}
-		return nfb, nil
+		return in.callFunc(fn, argVals, id.Pos)
 	}
 	if b, ok := in.builtins[id.Name]; ok {
 		return b(argVals, id.Pos, fb)
 	}
 	return nil, &RunError{Msg: fmt.Sprintf("CompileError: undeclared function %q", id.Name), Pos: id.Pos, FB: fb}
+}
+
+// callFunc 调用一个函数/方法。fn.Ret != "" 时返回 return 的值（tail 首元素），
+// 否则返回整个 FuncBuffer（out 收集在 tail）。
+func (in *interp) callFunc(fn *Func, args []Value, pos Pos) (Value, error) {
+	if len(args) != len(fn.Params) {
+		return nil, &RunError{Msg: fmt.Sprintf("CompileError: %s expects %d args, got %d", fn.Name, len(fn.Params), len(args)), Pos: pos}
+	}
+	for i, p := range fn.Params {
+		if isCopydType(p.Type) {
+			args[i] = deepCopy(args[i])
+		}
+	}
+	nfb := NewFuncBuffer(fn, args, pos)
+	if err := in.execute(nfb); err != nil {
+		return nil, err
+	}
+	if fn.Ret == "" {
+		return nfb, nil
+	}
+	v, err := nfb.Tail.Next()
+	if err != nil {
+		return NilV{}, nil // 带返回类型但裸 return：视为 nil
+	}
+	return v, nil
 }
 
 func (in *interp) evalArgs(args []Expr, sc *scope, fb *FuncBuffer) ([]Value, error) {
@@ -723,6 +880,18 @@ func (in *interp) callMethod(obj Value, name string, args []Value, fb *FuncBuffe
 			}
 			return StrV(strings.TrimRight(line, "\r\n")), nil
 		}
+	case *StructValue:
+		def, ok := in.impls[o.SType]
+		if !ok {
+			return nil, &RunError{Msg: fmt.Sprintf("TypeError: type %s has no impl", o.SType), Pos: pos, FB: fb}
+		}
+		if fn, ok := def.SelfMethods[name]; ok {
+			callArgs := append([]Value{o}, args...)
+			return in.callFunc(fn, callArgs, pos)
+		}
+		if _, ok := def.Methods[name]; ok {
+			return nil, &RunError{Msg: fmt.Sprintf("TypeError: %s.%s is a static method; call it via %s::%s(...)", o.SType, name, o.SType, name), Pos: pos, FB: fb}
+		}
 	}
 	return nil, &RunError{Msg: fmt.Sprintf("TypeError: no method %q on %s", name, obj.TypeName()), Pos: pos, FB: fb}
 }
@@ -884,6 +1053,12 @@ func (in *interp) evalScopeCall(x *ScopeCall, sc *scope, fb *FuncBuffer) (Value,
 			return NilV{}, nil
 		}
 		return nil, &RunError{Msg: fmt.Sprintf("TypeError: IO has no static method %q", x.Name), Pos: x.Pos, FB: fb}
+	}
+	if def, ok := in.impls[x.Scope]; ok {
+		if fn, ok := def.Methods[x.Name]; ok {
+			return in.callFunc(fn, args, x.Pos)
+		}
+		return nil, &RunError{Msg: fmt.Sprintf("TypeError: %s has no static method %q", x.Scope, x.Name), Pos: x.Pos, FB: fb}
 	}
 	return nil, &RunError{Msg: fmt.Sprintf("CompileError: unknown scope %q", x.Scope), Pos: x.Pos, FB: fb}
 }

@@ -560,3 +560,203 @@ func main(io IOStream) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+// ============ struct / impl / interface（spec §7） ============
+
+// 用户 struct：self 方法（.调用）、静态工厂（::调用）、成员赋值
+func TestStructAndMethods(t *testing.T) {
+	src := `
+struct {
+    x int;
+    y int;
+} Point;
+
+impl {
+    func translate(self, dx int, dy int) {
+        self.x = self.x + dx;
+        self.y = self.y + dy;
+    }
+    func sum(self) {
+        out self.x + self.y;
+    }
+    func new() Point {
+        p Point;
+        return p;
+    }
+} Point;
+
+func main(io IOStream) {
+    p Point = Point::new();
+    p.translate(3, 4);
+    io.println(p.x);
+    io.println(p.y);
+    fb FuncBuffer = p.sum();
+    io.println(*fb.tail);
+}`
+	out, err := runSrc(t, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "3\n4\n7\n"
+	if out != want {
+		t.Fatalf("got %q want %q", out, want)
+	}
+}
+
+// 用户自定义 Sign（spec §6.3 参考实现）：@LocalMemorize(mb) 走用户类型 call
+func TestUserSignMemorize(t *testing.T) {
+	src := `
+interface {
+    func call(prefix P, fb FuncBuffer) FuncBuffer;
+} Sign<P>;
+
+struct {
+    pairsParamToResult HashTable<List<interface{}>, List<interface{}>>;
+} LocalMemorize;
+
+impl Sign {
+    func call(prefix LocalMemorize, fb FuncBuffer) FuncBuffer {
+        key List<interface{}> = fb.head;
+        if (prefix.pairsParamToResult.contains(key)) {
+            fb.tail.appendAll(prefix.pairsParamToResult.get(key));
+            fb.log.append("cache hit");
+        } else {
+            fb.execute();
+            prefix.pairsParamToResult.put(key, fb.tail);
+            fb.log.append("cache miss");
+        }
+        return fb;
+    }
+    func new() LocalMemorize {
+        m LocalMemorize;
+        m.pairsParamToResult = HashTable::new();
+        return m;
+    }
+} LocalMemorize;
+
+func expensive(n int) {
+    out n * n;
+}
+
+func main(io IOStream) {
+    mb LocalMemorize = LocalMemorize::new();
+    fb FuncBuffer = expensive(41) @LocalMemorize(mb);
+    io.println(*fb.tail);
+    fb2 FuncBuffer = expensive(41) @LocalMemorize(mb);
+    io.println(*fb2.tail);
+    while (fb2.log.head() != fb2.log.tail()) {
+        io.println(fb2.log.next());
+    }
+}`
+	out, err := runSrc(t, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "1681\n1681\ncache hit\n"
+	if out != want {
+		t.Fatalf("got %q want %q", out, want)
+	}
+}
+
+// 带返回类型的函数：调用直接得到 return 的值
+func TestReturnTypedFunction(t *testing.T) {
+	src := `
+struct {
+    x int;
+} Point;
+
+func makePoint() Point {
+    p Point;
+    p.x = 42;
+    return p;
+}
+
+func main(io IOStream) {
+    p Point = makePoint();
+    io.println(p.x);
+}`
+	out, err := runSrc(t, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "42\n"
+	if out != want {
+		t.Fatalf("got %q want %q", out, want)
+	}
+}
+
+// impl Sign 缺 call → 编译期一致性检查报错（§11.1.3）
+func TestImplConformanceError(t *testing.T) {
+	src := `
+interface {
+    func call(prefix P, fb FuncBuffer) FuncBuffer;
+} Sign<P>;
+
+struct {
+    x int;
+} Bad;
+
+impl Sign {
+    func new() Bad {
+        b Bad;
+        return b;
+    }
+} Bad;
+
+func main(io IOStream) {
+    b Bad = Bad::new();
+    io.println(b.x);
+}`
+	_, err := runSrc(t, src)
+	if err == nil || !strings.Contains(err.Error(), "missing method") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// 静态方法用 . 调用 → 编译期报错（无 self 只能 :: 调用）
+func TestStaticMethodViaDot(t *testing.T) {
+	src := `
+struct {
+    x int;
+} Point;
+
+impl {
+    func new() Point {
+        p Point;
+        return p;
+    }
+} Point;
+
+func main(io IOStream) {
+    p Point = Point::new();
+    p.new();
+}`
+	_, err := runSrc(t, src)
+	if err == nil || !strings.Contains(err.Error(), "static method") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// 访问不存在的成员 → 编译期报错
+func TestStructUnknownMember(t *testing.T) {
+	src := `
+struct {
+    x int;
+} Point;
+
+impl {
+    func new() Point {
+        p Point;
+        return p;
+    }
+} Point;
+
+func main(io IOStream) {
+    p Point = Point::new();
+    io.println(p.nope);
+}`
+	_, err := runSrc(t, src)
+	if err == nil || !strings.Contains(err.Error(), "no member") {
+		t.Fatalf("got %v", err)
+	}
+}

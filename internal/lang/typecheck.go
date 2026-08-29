@@ -27,6 +27,7 @@ const (
 	tMemorize
 	tMemory
 	tFunc
+	tStruct
 )
 
 type Type struct {
@@ -64,7 +65,7 @@ var kindName = map[tKind]string{
 	tNil: "nil", tAny: "interface{}", tFuncBuffer: "FuncBuffer",
 	tIOStream: "IOStream", tInputStream: "InputStream", tOutputStream: "OutputStream",
 	tChannel: "Channel", tTask: "Task", tMemorize: "memorize", tMemory: "memory",
-	tFunc: "func",
+	tFunc: "func", tStruct: "struct",
 }
 
 func (t *Type) String() string {
@@ -81,6 +82,8 @@ func (t *Type) String() string {
 			return "func " + t.FName
 		}
 		return "func"
+	case tStruct:
+		return t.FName
 	}
 	if n, ok := kindName[t.Kind]; ok {
 		return n
@@ -110,11 +113,15 @@ func assignable(from, to *Type) bool {
 	}
 	switch to.Kind {
 	case tList:
-		return assignable(from.Elem, to.Elem)
+		return from.Elem.Kind == tAny || to.Elem.Kind == tAny || assignable(from.Elem, to.Elem)
 	case tHashTable:
-		return assignable(from.Key, to.Key) && assignable(from.Val, to.Val)
+		keyOK := from.Key.Kind == tAny || to.Key.Kind == tAny || assignable(from.Key, to.Key)
+		valOK := from.Val.Kind == tAny || to.Val.Kind == tAny || assignable(from.Val, to.Val)
+		return keyOK && valOK
 	case tFunc:
 		return to.FName == "" || from.FName == to.FName
+	case tStruct:
+		return from.FName == to.FName
 	}
 	return true
 }
@@ -276,21 +283,90 @@ func (s *cScope) lookup(name string) *cVar {
 }
 
 type checker struct {
-	fns  map[string]*Func
-	sigs map[string]int // 签名名 → <Prefix> 参数个数（memorize:1, async:0）
+	fns        map[string]*Func
+	sigs       map[string]int // 签名名 → <Prefix> 参数个数（memorize:1, async:0）
+	structs    map[string]*StructDef
+	interfaces map[string]*InterfaceDef
+	impls      map[string]*ImplDef
+	curRet     *Type
 }
 
 // Typecheck 执行 §11.1 的全部编译期严格检查。
 func Typecheck(prog *Program) error {
 	c := &checker{
-		fns:  map[string]*Func{},
-		sigs: map[string]int{"memorize": 1, "async": 0},
+		fns:        map[string]*Func{},
+		sigs:       map[string]int{"memorize": 1, "async": 0},
+		structs:    map[string]*StructDef{},
+		interfaces: map[string]*InterfaceDef{},
+		impls:      map[string]*ImplDef{},
 	}
 	for _, f := range prog.Funcs {
 		if _, dup := c.fns[f.Name]; dup {
 			return &CheckError{Msg: fmt.Sprintf("CompileError: duplicate function %q", f.Name), Pos: f.Pos}
 		}
-		c.fns[f.Name] = &Func{Name: f.Name, Params: f.Params, Body: f.Body, Pos: f.Pos}
+		c.fns[f.Name] = &Func{Name: f.Name, Params: f.Params, Ret: f.Ret, Body: f.Body, Pos: f.Pos}
+	}
+	for _, s := range prog.Structs {
+		if _, dup := c.structs[s.Name]; dup {
+			return &CheckError{Msg: fmt.Sprintf("CompileError: duplicate struct %q", s.Name), Pos: s.Pos}
+		}
+		def := &StructDef{Name: s.Name, Types: map[string]string{}}
+		for _, m := range s.Members {
+			def.Types[m.Name] = m.Type
+		}
+		c.structs[s.Name] = def
+	}
+	for _, i := range prog.Interfaces {
+		if _, dup := c.interfaces[i.Name]; dup {
+			return &CheckError{Msg: fmt.Sprintf("CompileError: duplicate interface %q", i.Name), Pos: i.Pos}
+		}
+		c.interfaces[i.Name] = &InterfaceDef{Name: i.Name, Methods: i.Methods}
+	}
+	for _, im := range prog.Impls {
+		def, ok := c.impls[im.Type]
+		if !ok {
+			def = &ImplDef{Type: im.Type, Iface: im.Iface, Methods: map[string]*Func{}, SelfMethods: map[string]*Func{}}
+			c.impls[im.Type] = def
+		} else if def.Iface == "" && im.Iface != "" {
+			def.Iface = im.Iface
+		}
+		for _, m := range im.Methods {
+			if len(m.Params) > 0 && m.Params[0].Name == "self" && m.Params[0].Type == "" {
+				m.Params[0].Type = im.Type
+			}
+			fn := &Func{Name: m.Name, Params: m.Params, Ret: m.Ret, Body: m.Body, Pos: m.Pos}
+			if len(m.Params) > 0 && m.Params[0].Name == "self" {
+				if _, dup := def.SelfMethods[fn.Name]; dup {
+					return &CheckError{Msg: fmt.Sprintf("CompileError: duplicate method %q on %s", fn.Name, im.Type), Pos: m.Pos}
+				}
+				def.SelfMethods[fn.Name] = fn
+			} else {
+				if _, dup := def.Methods[fn.Name]; dup {
+					return &CheckError{Msg: fmt.Sprintf("CompileError: duplicate method %q on %s", fn.Name, im.Type), Pos: m.Pos}
+				}
+				def.Methods[fn.Name] = fn
+			}
+		}
+	}
+	// impl 接口一致性（§11.1.3）：接口方法必须全部实现（名称 + 参数个数）
+	for _, im := range prog.Impls {
+		if im.Iface == "" {
+			continue
+		}
+		iface, ok := c.interfaces[im.Iface]
+		if !ok {
+			return &CheckError{Msg: fmt.Sprintf("CompileError: unknown interface %q", im.Iface), Pos: im.Pos}
+		}
+		def := c.impls[im.Type]
+		for _, sig := range iface.Methods {
+			fn, ok := def.Methods[sig.Name]
+			if !ok {
+				return &CheckError{Msg: fmt.Sprintf("CompileError: impl %s for %s: missing method %q", im.Type, im.Iface, sig.Name), Pos: im.Pos}
+			}
+			if len(fn.Params) != len(sig.Params) {
+				return &CheckError{Msg: fmt.Sprintf("CompileError: impl %s for %s: method %q takes %d params, interface requires %d", im.Type, im.Iface, sig.Name, len(fn.Params), len(sig.Params)), Pos: im.Pos}
+			}
+		}
 	}
 	for _, f := range prog.Funcs {
 		if f.Name == "main" && (len(f.Params) < 1 || len(f.Params) > 3) {
@@ -300,7 +376,29 @@ func Typecheck(prog *Program) error {
 			return err
 		}
 	}
+	for _, im := range prog.Impls {
+		for _, m := range im.Methods {
+			if err := c.checkFunc(&Func{Name: m.Name, Params: m.Params, Ret: m.Ret, Body: m.Body, Pos: m.Pos}); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
+}
+
+// resolveType 解析类型注解；未知名称回退到已注册的 struct/interface。
+func (c *checker) resolveType(s string, pos Pos) (*Type, error) {
+	t, err := parseTypeStr(s)
+	if err == nil {
+		return t, nil
+	}
+	if _, ok := c.structs[s]; ok {
+		return &Type{Kind: tStruct, FName: s}, nil
+	}
+	if _, ok := c.interfaces[s]; ok {
+		return tAnyV, nil
+	}
+	return nil, &CheckError{Msg: fmt.Sprintf("CompileError: unknown type %q", s), Pos: pos}
 }
 
 func (c *checker) errf(pos Pos, format string, args ...interface{}) error {
@@ -308,16 +406,27 @@ func (c *checker) errf(pos Pos, format string, args ...interface{}) error {
 }
 
 func (c *checker) paramType(p Param, pos Pos) (*Type, error) {
-	t, err := parseTypeStr(p.Type)
-	if err != nil {
-		return nil, &CheckError{Msg: "CompileError: " + err.Error(), Pos: p.Pos}
-	}
-	return t, nil
+	return c.resolveType(p.Type, p.Pos)
 }
 
 func (c *checker) checkFunc(f *Func) error {
+	var retType *Type
+	if f.Ret != "" {
+		t, err := c.resolveType(f.Ret, f.Pos)
+		if err != nil {
+			return err
+		}
+		retType = t
+	}
+	prev := c.curRet
+	c.curRet = retType
+	defer func() { c.curRet = prev }()
+
 	sc := newCScope(nil)
 	for _, p := range f.Params {
+		if p.Type == "" {
+			return &CheckError{Msg: fmt.Sprintf("CompileError: parameter %q of %s is missing a type annotation", p.Name, f.Name), Pos: p.Pos}
+		}
 		t, err := c.paramType(p, f.Pos)
 		if err != nil {
 			return err
@@ -353,8 +462,13 @@ func (c *checker) checkStmt(st Stmt, sc *cScope) error {
 		return nil
 	case *ReturnStmt:
 		if s.X != nil {
-			_, err := c.infer(s.X, sc)
-			return err
+			t, err := c.infer(s.X, sc)
+			if err != nil {
+				return err
+			}
+			if c.curRet != nil && !assignable(t, c.curRet) {
+				return c.errf(s.Pos, "TypeError: return type is %s, got %s", c.curRet, t)
+			}
 		}
 		return nil
 	case *IfStmt:
@@ -387,9 +501,9 @@ func (c *checker) checkStmt(st Stmt, sc *cScope) error {
 		}
 		return c.checkBlock(s.Body, inner)
 	case *DeclStmt:
-		typ, err := parseTypeStr(s.Type)
+		typ, err := c.resolveType(s.Type, s.Pos)
 		if err != nil {
-			return &CheckError{Msg: "CompileError: " + err.Error(), Pos: s.Pos}
+			return err
 		}
 		v := &cVar{typ: typ, init: false}
 		if s.Init != nil {
@@ -401,26 +515,52 @@ func (c *checker) checkStmt(st Stmt, sc *cScope) error {
 				return c.errf(s.Pos, "TypeError: cannot assign %s to %s", it, typ)
 			}
 			v.init = true
+		} else if typ.Kind == tStruct {
+			v.init = true // 结构体零值实例可用
 		}
 		return sc.declare(s.Name, v, s.Pos)
 	case *AssignStmt:
-		id, ok := s.Target.(*Ident)
-		if !ok {
-			return c.errf(s.Pos, "TypeError: unsupported assignment target (only identifiers are supported in v0.1)")
-		}
-		v := sc.lookup(id.Name)
-		if v == nil {
-			return c.errf(id.Pos, "CompileError: assignment to undeclared identifier %q", id.Name)
-		}
 		t, err := c.infer(s.X, sc)
 		if err != nil {
 			return err
 		}
-		if !assignable(t, v.typ) {
-			return c.errf(s.Pos, "TypeError: cannot assign %s to %s", t, v.typ)
+		switch target := s.Target.(type) {
+		case *Ident:
+			v := sc.lookup(target.Name)
+			if v == nil {
+				return c.errf(target.Pos, "CompileError: assignment to undeclared identifier %q", target.Name)
+			}
+			if !assignable(t, v.typ) {
+				return c.errf(s.Pos, "TypeError: cannot assign %s to %s", t, v.typ)
+			}
+			v.init = true
+			return nil
+		case *MemberExpr:
+			objT, err := c.infer(target.X, sc)
+			if err != nil {
+				return err
+			}
+			if objT.Kind != tStruct {
+				return c.errf(s.Pos, "TypeError: cannot assign member of %s", objT)
+			}
+			def, ok := c.structs[objT.FName]
+			if !ok {
+				return c.errf(s.Pos, "TypeError: unknown struct %s", objT.FName)
+			}
+			fieldT, ok := def.Types[target.Name]
+			if !ok {
+				return c.errf(target.Pos, "TypeError: no member %q on %s", target.Name, objT.FName)
+			}
+			ft, err := c.resolveType(fieldT, target.Pos)
+			if err != nil {
+				return err
+			}
+			if !assignable(t, ft) {
+				return c.errf(s.Pos, "TypeError: cannot assign %s to %s.%s (%s)", t, objT.FName, target.Name, ft)
+			}
+			return nil
 		}
-		v.init = true
-		return nil
+		return c.errf(s.Pos, "TypeError: unsupported assignment target")
 	}
 	return nil
 }
@@ -654,6 +794,12 @@ func (c *checker) memberType(recv *Type, name string, pos Pos) (*Type, error) {
 		}
 	case tMemorize:
 		// v0.1 memorize 为内置签名状态对象，无公开成员
+	case tStruct:
+		if def, ok := c.structs[recv.FName]; ok {
+			if typ, exists := def.Types[name]; exists {
+				return c.resolveType(typ, pos)
+			}
+		}
 	}
 	return nil, c.errf(pos, "TypeError: no member %q on %s", name, recv)
 }
@@ -806,6 +952,32 @@ func (c *checker) methodType(recv *Type, name string, args []*Type, pos Pos) (*T
 			}
 			return tIntV, nil
 		}
+	case tStruct:
+		def, ok := c.impls[recv.FName]
+		if !ok {
+			return nil, c.errf(pos, "TypeError: type %s has no impl", recv.FName)
+		}
+		if fn, ok := def.SelfMethods[name]; ok {
+			if len(fn.Params)-1 != len(args) {
+				return nil, c.errf(pos, "CompileError: %s() expects %d args, got %d", name, len(fn.Params)-1, len(args))
+			}
+			for i, p := range fn.Params[1:] {
+				pt, err := c.paramType(p, pos)
+				if err != nil {
+					return nil, err
+				}
+				if !assignable(args[i], pt) {
+					return nil, c.errf(pos, "TypeError: argument %d of %s: cannot assign %s to %s", i+1, name, args[i], pt)
+				}
+			}
+			if fn.Ret != "" {
+				return c.resolveType(fn.Ret, pos)
+			}
+			return tFuncBufferV, nil
+		}
+		if _, ok := def.Methods[name]; ok {
+			return nil, c.errf(pos, "TypeError: %s is a static method; call it via %s::%s(...)", name, recv.FName, name)
+		}
 	}
 	return nil, c.errf(pos, "TypeError: no method %q on %s", name, recv)
 }
@@ -821,20 +993,42 @@ func (c *checker) inferCall(x *CallExpr, sc *cScope) (*Type, error) {
 		if !ok {
 			return nil, c.errf(id.Pos, "CompileError: undeclared function %q", id.Name)
 		}
-		want, ok := c.sigs[x.Sign.Name]
-		if !ok {
-			return nil, c.errf(x.Pos, "CompileError: %q is not a registered signature (its type does not implement Sign)", x.Sign.Name)
-		}
-		if len(x.Sign.Args) != want {
-			return nil, c.errf(x.Pos, "CompileError: signature %q takes %d <Prefix> argument(s), got %d", x.Sign.Name, want, len(x.Sign.Args))
-		}
-		if x.Sign.Name == "memorize" && len(x.Sign.Args) == 1 {
+		if want, ok := c.sigs[x.Sign.Name]; ok {
+			if len(x.Sign.Args) != want {
+				return nil, c.errf(x.Pos, "CompileError: signature %q takes %d <Prefix> argument(s), got %d", x.Sign.Name, want, len(x.Sign.Args))
+			}
+			if x.Sign.Name == "memorize" && len(x.Sign.Args) == 1 {
+				pt, err := c.infer(x.Sign.Args[0], sc)
+				if err != nil {
+					return nil, err
+				}
+				if pt.Kind != tMemorize {
+					return nil, c.errf(x.Pos, "TypeError: @memorize prefix must be a memorize buffer, got %s", pt)
+				}
+			}
+		} else {
+			// 用户类型实现 Sign：签名名 = 类型名，必须有静态 call(prefix, fb)
+			def, ok := c.impls[x.Sign.Name]
+			if !ok {
+				return nil, c.errf(x.Pos, "CompileError: %q is not a registered signature (its type does not implement Sign)", x.Sign.Name)
+			}
+			if len(x.Sign.Args) != 1 {
+				return nil, c.errf(x.Pos, "CompileError: signature %q takes 1 <Prefix> argument, got %d", x.Sign.Name, len(x.Sign.Args))
+			}
+			callFn, ok := def.Methods["call"]
+			if !ok || len(callFn.Params) != 2 {
+				return nil, c.errf(x.Pos, "CompileError: type %q does not implement Sign (no static call(prefix, fb))", x.Sign.Name)
+			}
 			pt, err := c.infer(x.Sign.Args[0], sc)
 			if err != nil {
 				return nil, err
 			}
-			if pt.Kind != tMemorize {
-				return nil, c.errf(x.Pos, "TypeError: @memorize prefix must be a memorize buffer, got %s", pt)
+			wantT, err := c.paramType(callFn.Params[0], x.Pos)
+			if err != nil {
+				return nil, err
+			}
+			if !assignable(pt, wantT) {
+				return nil, c.errf(x.Pos, "TypeError: @%s prefix must be %s, got %s", x.Sign.Name, wantT, pt)
 			}
 		}
 		if err := c.checkCallArgs(fn, x.Args, sc, x.Pos); err != nil {
@@ -868,6 +1062,9 @@ func (c *checker) inferCall(x *CallExpr, sc *cScope) (*Type, error) {
 	if fn, ok := c.fns[id.Name]; ok {
 		if err := c.checkCallArgs(fn, x.Args, sc, x.Pos); err != nil {
 			return nil, err
+		}
+		if fn.Ret != "" {
+			return c.resolveType(fn.Ret, x.Pos)
 		}
 		return tFuncBufferV, nil
 	}
@@ -1019,6 +1216,28 @@ func (c *checker) inferScope(x *ScopeCall, sc *cScope) (*Type, error) {
 			return tIntV, nil
 		}
 		return nil, c.errf(x.Pos, "TypeError: GlobalMemory has no static method %q", x.Name)
+	}
+	if def, ok := c.impls[x.Scope]; ok {
+		fn, ok := def.Methods[x.Name]
+		if !ok {
+			return nil, c.errf(x.Pos, "TypeError: %s has no static method %q", x.Scope, x.Name)
+		}
+		if len(fn.Params) != len(args) {
+			return nil, c.errf(x.Pos, "CompileError: %s::%s expects %d args, got %d", x.Scope, x.Name, len(fn.Params), len(args))
+		}
+		for i, p := range fn.Params {
+			pt, err := c.paramType(p, x.Pos)
+			if err != nil {
+				return nil, err
+			}
+			if !assignable(args[i], pt) {
+				return nil, c.errf(x.Pos, "TypeError: argument %d of %s::%s: cannot assign %s to %s", i+1, x.Scope, x.Name, args[i], pt)
+			}
+		}
+		if fn.Ret != "" {
+			return c.resolveType(fn.Ret, x.Pos)
+		}
+		return tFuncBufferV, nil
 	}
 	return nil, c.errf(x.Pos, "CompileError: unknown scope %q", x.Scope)
 }

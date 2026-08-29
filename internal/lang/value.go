@@ -209,10 +209,12 @@ func hashKey(v Value) string { return v.TypeName() + ":" + v.String() }
 
 // ---- FuncBuffer (spec §5) ----
 
-// Func is a compiled QuarkLang function.
+// Func is a compiled QuarkLang function. Ret != "" means the call yields the
+// value of `return expr;`; otherwise the call yields the whole FuncBuffer.
 type Func struct {
 	Name   string
 	Params []Param
+	Ret    string
 	Body   *Block
 	Pos    Pos
 }
@@ -304,6 +306,22 @@ type Task struct {
 
 func (t *Task) TypeName() string { return "Task" }
 func (t *Task) String() string   { return "<Task " + t.Fn.Name + ">" }
+
+// StructValue is an instance of a user-defined struct.
+type StructValue struct {
+	SType  string
+	Fields map[string]Value
+}
+
+func (s *StructValue) TypeName() string { return s.SType }
+
+func (s *StructValue) String() string {
+	parts := make([]string, 0, len(s.Fields))
+	for k, v := range s.Fields {
+		parts = append(parts, k+"="+v.String())
+	}
+	return "<" + s.SType + " {" + strings.Join(parts, ", ") + "}>"
+}
 
 // Channel is the coroutine communication primitive (block-buffered).
 type Channel struct{ ch chan Value }

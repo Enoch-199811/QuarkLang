@@ -11,13 +11,14 @@
 - **协程系统**：`@async()`、`taskm::spawn/block/channel`、`yield;`、Task（是否完成 + 完整函数）、IOStream 执行表串行化并发 IO、调度事件自动日志；
 - **IO 体系**：`main(io IOStream, env, args)` 数据流注入、`IO::setIn/setOut` 与 `io.setIn/setOut` 重定向、File/Console 流；
 - **C 风格数值**：int 32 位环绕、越界字面量编译错误；`Copyd<T>` 传递复制语义。
+- **struct / impl / interface**：用户自定义结构体与接口；`self` 实例方法（`.` 调用）与静态方法（`::` 调用）；`impl Sign` 接口一致性检查；用户类型可直接实现 Sign 作为自定义签名（如 `@LocalMemorize(mb)`）。
 
 ## 快速开始
 
 ~~~sh
 go build -o quark .
 ./quark examples/hello.qk      # Hello World!
-go test ./internal/lang/       # 29 项测试（go test -race 同样可跑）
+go test ./internal/lang/       # 35 项测试（go test -race 同样可跑）
 ~~~
 
 ## 示例
@@ -31,6 +32,7 @@ go test ./internal/lang/       # 29 项测试（go test -race 同样可跑）
 | `examples/io.qk` | IO 重定向与 Console/File 流 |
 | `examples/async.qk` | 协程：@async() / channel / taskm::spawn·block / 自动日志 |
 | `examples/error.qk` | ListExhaustedError + log 回放演示 |
+| `examples/struct.qk` | 用户 struct/interface/impl + 用户自定义 Sign |
 
 ## 布局
 
@@ -52,7 +54,7 @@ go test ./internal/lang/       # 29 项测试（go test -race 同样可跑）
 
 ## 状态
 
-v0.1 解释器已完成：滚动 List、FuncBuffer、@memorize / @async 签名、out 多返回值、main(io/env/args)、IO 重定向与执行表、协程系统、编译期静态类型检查（29 项测试全绿）。待实现见 docs 分支 spec §15：用户自定义 struct/impl/interface、Copyd<T> 的 .ptr()、block 内存系统。
+v0.1 解释器已完成：滚动 List、FuncBuffer、@memorize / @async 签名、用户自定义 struct/impl/interface 与用户自定义 Sign、out 多返回值、main(io/env/args)、IO 重定向与执行表、协程系统、编译期静态类型检查（35 项测试全绿）。待实现见 docs 分支 spec §15：Copyd<T> 的 .ptr()、block 内存系统。
 
 ## 许可证
 

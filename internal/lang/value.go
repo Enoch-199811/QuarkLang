@@ -1,0 +1,335 @@
+package lang
+
+import (
+	"bufio"
+	"fmt"
+	"io"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+)
+
+// Value is any QuarkLang runtime value.
+type Value interface {
+	TypeName() string
+	String() string
+}
+
+// ---- scalars ----
+
+type IntV int64
+
+func (v IntV) TypeName() string { return "int" }
+func (v IntV) String() string   { return strconv.FormatInt(int64(v), 10) }
+
+type FloatV float64
+
+func (v FloatV) TypeName() string { return "float" }
+func (v FloatV) String() string   { return strconv.FormatFloat(float64(v), 'f', -1, 64) }
+
+type BoolV bool
+
+func (v BoolV) TypeName() string { return "bool" }
+func (v BoolV) String() string {
+	if bool(v) {
+		return "true"
+	}
+	return "false"
+}
+
+type StrV string
+
+func (v StrV) TypeName() string { return "String" }
+func (v StrV) String() string   { return string(v) }
+
+// NilV is the unit value.
+type NilV struct{}
+
+func (NilV) TypeName() string { return "nil" }
+func (NilV) String() string   { return "nil" }
+
+// ---- rolling List<T> (spec §4) ----
+
+// List is a rolling two-pointer buffer: visible elements live in [head, tail).
+type List struct {
+	items []Value
+	head  int
+	tail  int
+}
+
+func NewList(items ...Value) *List {
+	return &List{items: items, tail: len(items)}
+}
+
+func (l *List) TypeName() string { return "List" }
+
+func (l *List) String() string {
+	parts := make([]string, 0, l.tail-l.head)
+	for i := l.head; i < l.tail; i++ {
+		parts = append(parts, l.items[i].String())
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
+}
+
+// Head returns the head pointer position.
+func (l *List) Head() int { return l.head }
+
+// Tail returns the tail pointer position.
+func (l *List) Tail() int { return l.tail }
+
+// Size returns tail-head, the number of visible elements.
+func (l *List) Size() int { return l.tail - l.head }
+
+// Peek returns the element at the head without moving the pointer ('*list').
+func (l *List) Peek() (Value, error) {
+	if l.head == l.tail {
+		return nil, fmt.Errorf("ListExhaustedError: list is exhausted (head()==tail()); '*' stops and errors")
+	}
+	return l.items[l.head], nil
+}
+
+// Next returns the head element and rolls the head pointer forward one step.
+func (l *List) Next() (Value, error) {
+	if l.head == l.tail {
+		return nil, fmt.Errorf("ListExhaustedError: list is exhausted (head()==tail()); next() stops and errors")
+	}
+	v := l.items[l.head]
+	l.head++
+	return v, nil
+}
+
+// Reset moves the head pointer back to 0, making the full history visible again.
+func (l *List) Reset() { l.head = 0 }
+
+// Append writes v at the tail and moves the tail forward.
+func (l *List) Append(v Value) {
+	l.items = append(l.items, v)
+	l.tail++
+}
+
+// AppendAll copies every visible element of o onto the tail (o is not consumed).
+func (l *List) AppendAll(o *List) {
+	for i := o.head; i < o.tail; i++ {
+		l.Append(o.items[i])
+	}
+}
+
+// Get returns the i-th visible element (0-based, relative to head).
+func (l *List) Get(i int) (Value, error) {
+	idx := l.head + i
+	if i < 0 || idx >= l.tail {
+		return nil, fmt.Errorf("IndexOutOfBoundsError: index %d out of range [0,%d)", i, l.Size())
+	}
+	return l.items[idx], nil
+}
+
+// copyVisible returns a new List with a copy of the visible range.
+func (l *List) copyVisible() *List {
+	items := make([]Value, 0, l.Size())
+	for i := l.head; i < l.tail; i++ {
+		items = append(items, l.items[i])
+	}
+	return NewList(items...)
+}
+
+// sortInPlace sorts the visible range (int/float/String elements only).
+func (l *List) sortInPlace() error {
+	items := l.items[l.head:l.tail]
+	var sortErr error
+	sort.SliceStable(items, func(i, j int) bool {
+		a, b := items[i], items[j]
+		switch av := a.(type) {
+		case IntV:
+			switch bv := b.(type) {
+			case IntV:
+				return av < bv
+			case FloatV:
+				return float64(av) < float64(bv)
+			}
+		case FloatV:
+			switch bv := b.(type) {
+			case FloatV:
+				return float64(av) < float64(bv)
+			case IntV:
+				return float64(av) < float64(bv)
+			}
+		case StrV:
+			if bv, ok := b.(StrV); ok {
+				return av < bv
+			}
+		}
+		sortErr = fmt.Errorf("TypeError: __sort__ supports int/float/String elements only, got %s and %s", a.TypeName(), b.TypeName())
+		return false
+	})
+	return sortErr
+}
+
+// ---- HashTable<K,V> (spec §3.6) ----
+
+type HashTable struct {
+	m map[string]Value
+}
+
+func NewHashTable() *HashTable { return &HashTable{m: map[string]Value{}} }
+
+func (h *HashTable) TypeName() string { return "HashTable" }
+
+func (h *HashTable) String() string {
+	parts := make([]string, 0, len(h.m))
+	for k, v := range h.m {
+		parts = append(parts, k+" -> "+v.String())
+	}
+	return "{" + strings.Join(parts, ", ") + "}"
+}
+
+// Put stores a deep copy of v under key k.
+func (h *HashTable) Put(k, v Value) { h.m[hashKey(k)] = deepCopy(v) }
+
+// Get returns the value stored under k.
+func (h *HashTable) Get(k Value) (Value, bool) {
+	v, ok := h.m[hashKey(k)]
+	return v, ok
+}
+
+// Contains reports whether k is present.
+func (h *HashTable) Contains(k Value) bool {
+	_, ok := h.m[hashKey(k)]
+	return ok
+}
+
+// Remove deletes the entry for k.
+func (h *HashTable) Remove(k Value) { delete(h.m, hashKey(k)) }
+
+// Size returns the number of entries.
+func (h *HashTable) Size() int { return len(h.m) }
+
+// hashKey builds a stable structural key for any Value.
+func hashKey(v Value) string { return v.TypeName() + ":" + v.String() }
+
+// ---- FuncBuffer (spec §5) ----
+
+// Func is a compiled QuarkLang function.
+type Func struct {
+	Name   string
+	Params []Param
+	Body   *Block
+	Pos    Pos
+}
+
+// FuncBuffer holds a call's inputs (head), outputs (tail), and execution log.
+type FuncBuffer struct {
+	Fn       *Func
+	Head     *List
+	Tail     *List
+	Log      *List
+	executed bool
+	pos      Pos
+}
+
+func NewFuncBuffer(fn *Func, args []Value, pos Pos) *FuncBuffer {
+	items := make([]Value, len(args))
+	copy(items, args)
+	return &FuncBuffer{
+		Fn:   fn,
+		Head: NewList(items...),
+		Tail: NewList(),
+		Log:  NewList(),
+		pos:  pos,
+	}
+}
+
+func (fb *FuncBuffer) TypeName() string { return "FuncBuffer" }
+
+func (fb *FuncBuffer) String() string {
+	return fmt.Sprintf("<FuncBuffer %s head=%s tail=%s>", fb.Fn.Name, fb.Head.String(), fb.Tail.String())
+}
+
+// ---- IO objects (spec §10) ----
+
+// IOStream is the default main() parameter: input + output + redirectable.
+// mu serializes conflicting IO operations (the 执行表, spec §14).
+type IOStream struct {
+	In  io.Reader
+	Out io.Writer
+	rd  *bufio.Reader
+	mu  sync.Mutex
+}
+
+func (s *IOStream) TypeName() string { return "IOStream" }
+func (s *IOStream) String() string   { return "<IOStream>" }
+
+// InputStream is the input base type (File* / Console* subclasses).
+type InputStream struct{ R io.Reader }
+
+func (s *InputStream) TypeName() string { return "InputStream" }
+func (s *InputStream) String() string   { return "<InputStream>" }
+
+// OutputStream is the output base type.
+type OutputStream struct{ W io.Writer }
+
+func (s *OutputStream) TypeName() string { return "OutputStream" }
+func (s *OutputStream) String() string   { return "<OutputStream>" }
+
+// MemorizeBuffer is the state of the built-in memorize signature.
+type MemorizeBuffer struct{ Table *HashTable }
+
+func (m *MemorizeBuffer) TypeName() string { return "memorize" }
+func (m *MemorizeBuffer) String() string   { return "<memorize buffer>" }
+
+// Memory is the default concrete instance of the global memory struct
+// (block-managed; spec §14). v0.1: memory is backed by the host Go GC, and
+// compact() is a compatibility entry that performs no real reclamation.
+type Memory struct{}
+
+func (m *Memory) TypeName() string { return "memory" }
+func (m *Memory) String() string   { return "<memory>" }
+
+// globalMemory is the built-in `memory` identifier.
+var globalMemory = &Memory{}
+
+// FuncValue is a first-class function reference (for taskm::spawn etc.).
+type FuncValue struct{ fn *Func }
+
+func (f *FuncValue) TypeName() string { return "func" }
+func (f *FuncValue) String() string   { return "<func " + f.fn.Name + ">" }
+
+// Task is the result of @async()/taskm::spawn: the done flag plus the full
+// FuncBuffer of the coroutine (spec §14).
+type Task struct {
+	*FuncBuffer
+	doneCh chan struct{}
+	err    error
+}
+
+func (t *Task) TypeName() string { return "Task" }
+func (t *Task) String() string   { return "<Task " + t.Fn.Name + ">" }
+
+// Channel is the coroutine communication primitive (block-buffered).
+type Channel struct{ ch chan Value }
+
+func NewChannel() *Channel { return &Channel{ch: make(chan Value)} }
+
+func (c *Channel) TypeName() string { return "Channel" }
+func (c *Channel) String() string   { return "<Channel>" }
+
+// ---- deep copy (Copyd semantics; HashTable stores deep copies) ----
+
+func deepCopy(v Value) Value {
+	switch t := v.(type) {
+	case *List:
+		items := make([]Value, len(t.items))
+		for i, it := range t.items {
+			items[i] = deepCopy(it)
+		}
+		return &List{items: items, head: t.head, tail: t.tail}
+	case *HashTable:
+		h := NewHashTable()
+		for k, it := range t.m {
+			h.m[k] = deepCopy(it)
+		}
+		return h
+	default:
+		return v
+	}
+}

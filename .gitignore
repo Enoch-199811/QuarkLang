@@ -1,0 +1,13 @@
+# 构建产物
+/quark
+/quark.exe
+/quarklang
+
+# 示例运行产物
+out.txt
+out2.txt
+*.out
+
+# 编辑器/系统
+.DS_Store
+*.swp

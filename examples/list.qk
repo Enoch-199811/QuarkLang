@@ -1,0 +1,12 @@
+// 滚动 List：* 取开头，next() 滚动，for 语法糖，耗尽报错，reset() 回卷
+func main(io IOStream) {
+    l List<int> = [10, 20, 30];
+    io.println(*l);              // 10 —— * 只读
+    io.println(l.next());        // 10 —— 滚动取走
+    for (x : l) {                // 20 30 —— 从头滚到尾
+        io.println(x);
+    }
+    io.println(l.head() == l.tail());  // true —— 已耗尽
+    l.reset();                   // head 直接移回 0，全部历史重新可见
+    io.println(*l);              // 10 —— 又可以从头看
+}

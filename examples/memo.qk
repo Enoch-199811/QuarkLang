@@ -1,0 +1,18 @@
+func expensive(n int) {
+    log "running expensive: " + n;   // log 必须手动调用
+    out n * n;
+}
+
+func main(io IOStream) {
+    mb memorize = memorize::new();
+    fb FuncBuffer = expensive(41) @memorize(mb);
+    io.println(*fb.tail);         // 1681（首次：执行并缓存）
+    fb2 FuncBuffer = expensive(41) @memorize(mb);
+    io.println(*fb2.tail);        // 1681（缓存命中，函数体未再执行）
+    while (fb.log.head() != fb.log.tail()) {
+        io.println(fb.log.next());   // running expensive: 41（手动 log 回放）
+    }
+    while (fb2.log.head() != fb2.log.tail()) {
+        io.println(fb2.log.next());   // 空 —— 命中缓存时函数体未执行
+    }
+}

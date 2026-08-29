@@ -1,0 +1,13 @@
+func LocalSorted(n int, a int[Copyd]) {
+    a.__sort__();   // 作用在复制出来的副本上
+    out n;
+    out a;
+}
+
+func main(io IOStream) {
+    l List<int> = [3, 1, 2];
+    fb FuncBuffer = LocalSorted(7, l);
+    io.println(fb.tail.next());   // 7
+    io.println(fb.tail.next());   // [1, 2, 3]
+    io.println(*l);               // 3 —— 原列表未被修改（Copyd）
+}

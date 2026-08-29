@@ -1,0 +1,6 @@
+func main(io IOStream) {
+    io.setOut(FileOutputStream("out.txt"));
+    io.println("redirected to file");
+    io.setOut(ConsoleOutputStream());
+    io.println("back to console");
+}

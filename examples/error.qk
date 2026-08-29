@@ -1,0 +1,7 @@
+// 耗尽后继续 next()：报错并回放手动写入的 log，展示“为什么运行错了”
+func main(io IOStream) {
+    l List<int> = [1];
+    log "about to consume";
+    l.next();
+    l.next();
+}

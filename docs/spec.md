@@ -469,8 +469,9 @@ func main(io IOStream) {
 
 实现状态（2026-08-29，v0.1 解释器）：
 - ✅ lexer / parser / eval / runtime：滚动 List（`*`、`next()`、耗尽报错）、FuncBuffer（head/tail/log）、@签名 + 内置 memorize（head→tail 缓存）、out 多返回值、main(io/env/args)、IO 重定向与 Console/File 流、`for (x : list)`、`__sort__`、严格运行时错误 + log 回放。
-- ✅ 验证：`go test` 29 项全绿（含 `-race` 数据竞争检测）；`examples/` 7 个示例全部正确运行（含 error.qk 的 ListExhaustedError + log 回放）。
+- ✅ 验证：`go test` 35 项全绿（含 `-race` 数据竞争检测）；`examples/` 8 个示例全部正确运行（含 error.qk 的 ListExhaustedError + log 回放、struct.qk 的用户自定义 Sign）。
 - ✅ 2026-08-29：log 仅手动写入（`log expr;` / `fb.log.append(...)`）；int 32 位环绕 + 越界字面量编译错误；`List.reset()`（head→0）。
-- ⏳ 待实现：编译期静态类型检查 pass（§11.1 八条前置到编译期）；用户自定义 struct/impl/interface；Copyd<T> 与 `.ptr()`；block 级脏标记与真实内存回收（§14 内存系统轮）。
+- ⏳ 待实现：Copyd<T> 运行时包装与 `.ptr()`；block 级脏标记与真实内存回收（§14 内存系统轮）。
 - ✅ 2026-08-29 协程系统 v0.1：`@async()`、`taskm::spawn/block/channel`、`yield;`、Task（done + 完整 FuncBuffer）、IOStream 执行表（互斥队列串行化并发 IO）、调度事件自动日志（spawn/yield/done）。
 - ✅ 2026-08-29 编译期静态类型检查 pass：类型推断 + §11.1 检查前置到编译期（未声明标识符/成员、类型不匹配、签名注册与 Prefix 类型、调用实参个数与类型、使用前未初始化、非 List 施加 `*`/next 等、main 参数个数），错误一律带行号；Array/Copyd 静态归一化为 List（复制语义由运行时按注解处理）。
+- ✅ 2026-08-29 用户自定义 struct/impl/interface：结构体（成员、零值实例、字段读写）、interface（方法签名 + 泛型参数）、impl（self 实例方法用 `.` 调用、无 self 静态方法用 `::` 调用）、`impl Sign` 接口一致性检查（缺 call/参数个数不符 → 编译错误）、带返回类型注解的函数（`func f(...) T` 直接返回 `return` 的值，无注解则返回 FuncBuffer）、用户类型实现 Sign 可作为自定义签名（`f(args) @LocalMemorize(mb)`，spec §6.3 参考实现可作为用户代码运行）。

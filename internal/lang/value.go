@@ -225,32 +225,26 @@ type Func struct {
 	Pos    Pos
 }
 
-// FuncBuffer holds a call's inputs (head), outputs (tail), and execution log.
-type FuncBuffer struct {
+// execCtx 是函数执行的内部上下文（v2：语言面不再有 FuncBuffer）。
+// 函数执行记录日志（log），结果由 return 直接产生。
+type execCtx struct {
 	Fn       *Func
-	Head     *List
-	Tail     *List
+	Args     []Value
 	Log      *List
+	result   Value
 	executed bool
 	pos      Pos
 }
 
-func NewFuncBuffer(fn *Func, args []Value, pos Pos) *FuncBuffer {
+func NewExecCtx(fn *Func, args []Value, pos Pos) *execCtx {
 	items := make([]Value, len(args))
 	copy(items, args)
-	return &FuncBuffer{
+	return &execCtx{
 		Fn:   fn,
-		Head: NewList(items...),
-		Tail: NewList(),
+		Args: items,
 		Log:  NewList(),
 		pos:  pos,
 	}
-}
-
-func (fb *FuncBuffer) TypeName() string { return "FuncBuffer" }
-
-func (fb *FuncBuffer) String() string {
-	return fmt.Sprintf("<FuncBuffer %s head=%s tail=%s>", fb.Fn.Name, fb.Head.String(), fb.Tail.String())
 }
 
 // ---- IO objects (spec §10) ----
@@ -315,18 +309,30 @@ type FuncValue struct{ fn *Func }
 func (f *FuncValue) TypeName() string { return "func" }
 func (f *FuncValue) String() string   { return "<func " + f.fn.Name + ">" }
 
-// Task is the result of @async()/taskm::spawn: the done flag plus the full
-// FuncBuffer of the coroutine (spec §14).
+// Task 是线程（taskm）的执行上下文：done = 线程是否空闲。
 type Task struct {
-	*FuncBuffer
+	ctx     *execCtx
 	doneCh  chan struct{}
 	err     error
 	Pid     int
 	BlockID int
+	Busy    bool // 是否有函数占用（done 即 !Busy）
 }
 
 func (t *Task) TypeName() string { return "Task" }
-func (t *Task) String() string   { return "<Task " + t.Fn.Name + ">" }
+func (t *Task) String() string   { return "<Task " + itoa(t.Pid) + ">" }
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	digits := ""
+	for n > 0 {
+		digits = string(rune('0'+n%10)) + digits
+		n /= 10
+	}
+	return digits
+}
 
 // StructValue is an instance of a user-defined struct.
 type StructValue struct {

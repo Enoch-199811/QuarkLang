@@ -39,8 +39,8 @@ type Type struct {
 	Elem   *Type
 	Key    *Type
 	Val    *Type
-	FName  string          // tFunc: 函数名（"" = 未知）；tStruct: 结构体名
-	Args   []*Type         // tStruct: 泛型实例实参
+	FName  string           // tFunc: 函数名（"" = 未知）；tStruct: 结构体名
+	Args   []*Type          // tStruct: 泛型实例实参
 	Fields map[string]*Type // tStruct 匿名（FName="."）：字段类型表
 }
 
@@ -207,7 +207,7 @@ func parseTypeStr(s string) (*Type, error) {
 	case "String":
 		return tStringV, nil
 	case "void":
-		return tNilV, nil
+		return tAnyV, nil // v2：void = 空接口 interface{} 的默认名字
 	case "FuncBuffer":
 		return tFuncBufferV, nil
 	case "IOStream":
@@ -518,7 +518,7 @@ func (c *checker) substType(s string, subst map[string]*Type, pos Pos) (*Type, e
 	case "bool":
 		return tBoolV, nil
 	case "void":
-		return tNilV, nil
+		return tAnyV, nil // v2：void = 空接口 interface{} 的默认名字
 	case "FuncBuffer":
 		return tFuncBufferV, nil
 	case "IOStream":

@@ -13,6 +13,7 @@ type Program struct {
 	Interfaces []*InterfaceDecl
 	Impls      []*ImplDecl
 	Kind       string // "main"（默认）| "library"（program 宏）
+	kindSet    bool
 	Imports    []string
 	Pub        []string // pub 宏：库中公开的符号名
 }
@@ -102,6 +103,13 @@ type LogStmt struct {
 	X   Expr
 	Pos Pos
 }
+
+// DeleteStmt：delete variable; —— 回收内存于 __delete__()，本质是给对应 block 的日志加消除记录。
+type DeleteStmt struct {
+	X   Expr
+	Pos Pos
+}
+
 type TryStmt struct {
 	Try          *Block
 	CatchVar     string
@@ -143,6 +151,7 @@ type AssignStmt struct {
 
 func (*ExprStmt) isStmt()   {}
 func (*LogStmt) isStmt()    {}
+func (*DeleteStmt) isStmt() {}
 func (*TryStmt) isStmt()    {}
 func (*ReturnStmt) isStmt() {}
 func (*IfStmt) isStmt()     {}

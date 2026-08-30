@@ -80,9 +80,10 @@ type MemBlock struct {
 
 // MemoryManager 管理 block 分配/脏标记/回收。
 type MemoryManager struct {
-	mu     sync.Mutex
-	nextID int
-	blocks map[int]*MemBlock
+	mu        sync.Mutex
+	nextID    int
+	blocks    map[int]*MemBlock
+	deletions []int // 消除日志（delete 记录）
 }
 
 func NewMemoryManager() *MemoryManager {
@@ -136,11 +137,22 @@ func (m *MemoryManager) BlockCount() int {
 	return len(m.blocks)
 }
 
-// Clear 直接清理整个内存（xmind：globalMemory.clear() 按修改日志记录直接清理）。
+// Delete 在消除日志中记录并直接清空该 block 的内存（xmind：delete 本质是给对应 block 日志加消除记录）。
+func (m *MemoryManager) Delete(id int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.blocks[id]; ok {
+		m.deletions = append(m.deletions, id) // 消除日志
+		delete(m.blocks, id)
+	}
+}
+
+// Clear 直接清理整个内存（xmind：clear() 差分计算——被 delete 标记的 block 直接清空）。
 func (m *MemoryManager) Clear() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.blocks = map[int]*MemBlock{}
+	m.deletions = m.deletions[:0]
 }
 
 // StructDef is a registered struct declaration.
@@ -385,6 +397,29 @@ func (in *interp) execStmt(st Stmt, sc *scope, ctx *execCtx) error {
 	case *ExprStmt:
 		_, err := in.evalExpr(s.X, sc, ctx)
 		return err
+	case *DeleteStmt:
+		// delete variable; —— 回收内存于 __delete__()；本质给对应 block 日志加消除记录
+		v, err := in.evalExpr(s.X, sc, ctx)
+		if err != nil {
+			return err
+		}
+		if l, ok := v.(*List); ok {
+			// 数组/List 可以直接回收（无 block 时先分配以记录消除日志）
+			id := l.blockID
+			if id == 0 {
+				id = in.mem.Alloc(globalMemory.BlockSize, 0)
+			}
+			in.mem.Delete(id)
+		} else if sv, ok := v.(*StructValue); ok {
+			if def, has := in.impls[sv.SType]; has {
+				if fn, ok := def.SelfMethods["__delete__"]; ok {
+					if _, err := in.callFunc(fn, []Value{sv}, s.Pos); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		return nil
 	case *LogStmt:
 		// log 记录日志并结束函数（返回任意值，默认 nil）
 		v, err := in.evalExpr(s.X, sc, ctx)

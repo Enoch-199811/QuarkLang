@@ -711,6 +711,9 @@ func (c *checker) checkStmt(st Stmt, sc *cScope) error {
 	case *ExprStmt:
 		_, err := c.infer(s.X, sc)
 		return err
+	case *DeleteStmt:
+		_, err := c.infer(s.X, sc)
+		return err
 	case *LogStmt:
 		_, err := c.infer(s.X, sc)
 		return err

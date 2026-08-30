@@ -120,24 +120,36 @@ func (p *parser) parseProgram() (*Program, error) {
 	for !p.curIs(TEOF) {
 		switch p.cur().Kind {
 		case TFunc:
+			if prog.kindSet {
+				return nil, p.errf(p.cur(), "program 预制宏必须写在程序末尾（节点接入先后顺序），%s 声明不得在其后", "func")
+			}
 			fn, err := p.parseFunc()
 			if err != nil {
 				return nil, err
 			}
 			prog.Funcs = append(prog.Funcs, fn)
 		case TStruct:
+			if prog.kindSet {
+				return nil, p.errf(p.cur(), "program 预制宏必须写在程序末尾（节点接入先后顺序），struct 声明不得在其后")
+			}
 			sd, err := p.parseStruct()
 			if err != nil {
 				return nil, err
 			}
 			prog.Structs = append(prog.Structs, sd)
 		case TInterface:
+			if prog.kindSet {
+				return nil, p.errf(p.cur(), "program 预制宏必须写在程序末尾（节点接入先后顺序），interface 声明不得在其后")
+			}
 			id, err := p.parseInterface()
 			if err != nil {
 				return nil, err
 			}
 			prog.Interfaces = append(prog.Interfaces, id)
 		case TImpl:
+			if prog.kindSet {
+				return nil, p.errf(p.cur(), "program 预制宏必须写在程序末尾（节点接入先后顺序），impl 声明不得在其后")
+			}
 			im, err := p.parseImpl()
 			if err != nil {
 				return nil, err
@@ -218,7 +230,11 @@ func (p *parser) parseProgram() (*Program, error) {
 					if _, err := p.expect(TSemi, "';'"); err != nil {
 						return nil, err
 					}
+					if prog.Kind != "" {
+						return nil, p.errf(kind, "重复的 program 预制宏")
+					}
 					prog.Kind = kind.Text
+					prog.kindSet = true
 					continue
 				case "import":
 					// 预制宏：import path;（同目录默认在搜索范围）
@@ -680,6 +696,18 @@ func (p *parser) parseBlock() (*Block, error) {
 }
 
 func (p *parser) parseStmt() (Stmt, error) {
+	// delete variable; 语句（xmind 内存：回收内存于 __delete__()）
+	if p.curIs(TIdent) && p.cur().Text == "delete" {
+		kw := p.advance()
+		x, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(TSemi, "';'"); err != nil {
+			return nil, err
+		}
+		return &DeleteStmt{X: x, Pos: Pos{Line: kw.Line, Col: kw.Col}}, nil
+	}
 	switch p.cur().Kind {
 	case TOut:
 		return nil, p.errf(p.cur(), "out 已在新模型中移除：请用 return expr; 返回结果")

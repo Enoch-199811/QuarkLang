@@ -185,8 +185,11 @@ func assignable(from, to *Type) bool {
 // （运行时只有 List；Copyd 的复制语义由运行时按参数注解处理）。
 func parseTypeStr(s string) (*Type, error) {
 	s = strings.TrimSpace(s)
-	if s == "interface{}" {
+	if s == "interface{}" || s == "any" {
 		return tAnyV, nil
+	}
+	if s == "Self" {
+		return &Type{Kind: tTypeVar, FName: "Self"}, nil
 	}
 	base, inner, suffix := splitType(s)
 	elem := func() (*Type, error) {
@@ -380,7 +383,7 @@ func Typecheck(prog *Program) error {
 		if _, dup := c.interfaces[i.Name]; dup {
 			return &CheckError{Msg: fmt.Sprintf("CompileError: duplicate interface %q", i.Name), Pos: i.Pos}
 		}
-		c.interfaces[i.Name] = &InterfaceDef{Name: i.Name, Methods: i.Methods}
+		c.interfaces[i.Name] = &InterfaceDef{Name: i.Name, Methods: i.Methods, Expands: i.Expands}
 	}
 	for _, im := range prog.Impls {
 		// 泛型规则：struct 有泛型参数时 impl 必须引入同样的参数；struct 无参数时 impl 不许有
@@ -432,13 +435,27 @@ func Typecheck(prog *Program) error {
 			return &CheckError{Msg: fmt.Sprintf("CompileError: unknown interface %q", im.Iface), Pos: im.Pos}
 		}
 		def := c.impls[im.Type]
-		for _, sig := range iface.Methods {
-			fn, ok := def.Methods[sig.Name]
+		// 组合接口：递归收集 expand 展开的方法
+		methods := iface.Methods
+		for _, ex := range iface.Expands {
+			ei, ok := c.interfaces[ex]
 			if !ok {
+				return &CheckError{Msg: fmt.Sprintf("CompileError: expand interface %q 未定义", ex), Pos: im.Pos}
+			}
+			methods = append(methods, ei.Methods...)
+		}
+		for _, sig := range methods {
+			fn := def.SelfMethods[sig.Name]
+			if fn == nil {
+				fn = def.Methods[sig.Name]
+			}
+			if fn == nil {
 				return &CheckError{Msg: fmt.Sprintf("CompileError: impl %s for %s: missing method %q", im.Type, im.Iface, sig.Name), Pos: im.Pos}
 			}
-			if len(fn.Params) != len(sig.Params) {
-				return &CheckError{Msg: fmt.Sprintf("CompileError: impl %s for %s: method %q takes %d params, interface requires %d", im.Type, im.Iface, sig.Name, len(fn.Params), len(sig.Params)), Pos: im.Pos}
+			want := len(sig.Params) // 接口签名含 self
+			got := len(fn.Params)
+			if got != want {
+				return &CheckError{Msg: fmt.Sprintf("CompileError: impl %s for %s: method %q takes %d params, interface requires %d", im.Type, im.Iface, sig.Name, got, want), Pos: im.Pos}
 			}
 		}
 	}
@@ -481,8 +498,11 @@ func (c *checker) substType(s string, subst map[string]*Type, pos Pos) (*Type, e
 	if s == "null" {
 		return &Type{Kind: tNull}, nil
 	}
-	if s == "interface{}" {
-		return tAnyV, nil
+	if s == "interface{}" || s == "any" {
+		return tAnyV, nil // any 与 void 都用空接口实现（xmind §接口）
+	}
+	if s == "Self" {
+		return &Type{Kind: tTypeVar, FName: "Self"}, nil // Self = 所指类型（xmind §接口）
 	}
 	if s == "" {
 		return nil, &CheckError{Msg: "CompileError: empty type annotation", Pos: pos}

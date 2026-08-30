@@ -70,6 +70,7 @@ type MethodSig struct {
 type InterfaceDecl struct {
 	Name    string
 	Methods []MethodSig
+	Expands []string // expand interface 组合接口（xmind §接口）
 	Pos     Pos
 }
 

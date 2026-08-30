@@ -154,6 +154,7 @@ type StructDef struct {
 type InterfaceDef struct {
 	Name    string
 	Methods []MethodSig
+	Expands []string // expand interface 组合接口
 }
 
 // ImplDef is a registered impl block: Methods are static (no self), SelfMethods
@@ -222,7 +223,7 @@ func runWithInterp(prog *Program, filename string, args []string, stdin io.Reade
 		if _, dup := in.interfaces[i.Name]; dup {
 			return nil, fmt.Errorf("CompileError: duplicate interface %q", i.Name)
 		}
-		in.interfaces[i.Name] = &InterfaceDef{Name: i.Name, Methods: i.Methods}
+		in.interfaces[i.Name] = &InterfaceDef{Name: i.Name, Methods: i.Methods, Expands: i.Expands}
 	}
 	for _, im := range prog.Impls {
 		def, ok := in.impls[im.Type]

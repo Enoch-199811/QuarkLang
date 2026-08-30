@@ -88,7 +88,6 @@ type LogStmt struct {
 	X   Expr
 	Pos Pos
 }
-type YieldStmt struct{ Pos Pos }
 type ReturnStmt struct {
 	X   Expr // nil X = bare return
 	Pos Pos
@@ -123,7 +122,6 @@ type AssignStmt struct {
 func (*ExprStmt) isStmt()   {}
 func (*OutStmt) isStmt()    {}
 func (*LogStmt) isStmt()    {}
-func (*YieldStmt) isStmt()  {}
 func (*ReturnStmt) isStmt() {}
 func (*IfStmt) isStmt()     {}
 func (*WhileStmt) isStmt()  {}

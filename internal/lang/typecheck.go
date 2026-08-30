@@ -28,6 +28,7 @@ const (
 	tMemory
 	tFunc
 	tStruct
+	tTaskm
 )
 
 type Type struct {
@@ -58,6 +59,7 @@ var (
 	tTaskV         = mk(tTask)
 	tMemorizeV     = mk(tMemorize)
 	tMemoryV       = mk(tMemory)
+	tTaskmV        = mk(tTaskm)
 )
 
 var kindName = map[tKind]string{
@@ -65,7 +67,7 @@ var kindName = map[tKind]string{
 	tNil: "nil", tAny: "interface{}", tFuncBuffer: "FuncBuffer",
 	tIOStream: "IOStream", tInputStream: "InputStream", tOutputStream: "OutputStream",
 	tChannel: "Channel", tTask: "Task", tMemorize: "memorize", tMemory: "memory",
-	tFunc: "func", tStruct: "struct",
+	tFunc: "func", tStruct: "struct", tTaskm: "taskm",
 }
 
 func (t *Type) String() string {
@@ -174,6 +176,8 @@ func parseTypeStr(s string) (*Type, error) {
 		return tMemorizeV, nil
 	case "memory":
 		return tMemoryV, nil
+	case "taskm":
+		return tTaskmV, nil
 	case "func":
 		return mkFunc(""), nil
 	case "List", "Array":
@@ -458,8 +462,6 @@ func (c *checker) checkStmt(st Stmt, sc *cScope) error {
 	case *LogStmt:
 		_, err := c.infer(s.X, sc)
 		return err
-	case *YieldStmt:
-		return nil
 	case *ReturnStmt:
 		if s.X != nil {
 			t, err := c.infer(s.X, sc)
@@ -641,6 +643,9 @@ func (c *checker) infer(e Expr, sc *cScope) (*Type, error) {
 		}
 		if x.Name == "memory" {
 			return tMemoryV, nil
+		}
+		if x.Name == "taskm" {
+			return tTaskmV, nil
 		}
 		if v := sc.lookup(x.Name); v != nil {
 			if !v.init {
@@ -946,11 +951,72 @@ func (c *checker) methodType(recv *Type, name string, args []*Type, pos Pos) (*T
 			return tBoolV, nil
 		}
 	case tMemory:
-		if name == "compact" {
+		switch name {
+		case "compact":
 			if err := c.checkArity(name, 0, len(args), pos); err != nil {
 				return nil, err
 			}
-			return tIntV, nil
+			return tNilV, nil // compact() 根本不返回
+		case "setBlock":
+			if err := c.checkArity(name, 1, len(args), pos); err != nil {
+				return nil, err
+			}
+			if args[0].Kind != tInt {
+				return nil, c.errf(pos, "TypeError: setBlock(n) requires an int block size, got %s", args[0])
+			}
+			return tNilV, nil
+		}
+	case tTaskm:
+		switch name {
+		case "spawn":
+			if len(args) < 1 {
+				return nil, c.errf(pos, "CompileError: taskm.spawn requires a function reference as first arg")
+			}
+			if args[0].Kind != tFunc {
+				return nil, c.errf(pos, "TypeError: taskm.spawn requires a function reference, got %s", args[0])
+			}
+			if args[0].FName != "" {
+				if fn, ok := c.fns[args[0].FName]; ok {
+					if len(fn.Params) != len(args)-1 {
+						return nil, c.errf(pos, "CompileError: %s expects %d args, got %d", fn.Name, len(fn.Params), len(args)-1)
+					}
+					for i, p := range fn.Params {
+						pt, err := c.paramType(p, pos)
+						if err != nil {
+							return nil, err
+						}
+						if !assignable(args[i+1], pt) {
+							return nil, c.errf(pos, "TypeError: argument %d of %s: cannot assign %s to %s", i+1, fn.Name, args[i+1], pt)
+						}
+					}
+				}
+			}
+			return tIntV, nil // spawn() 返回 pid
+		case "block", "merge":
+			if err := c.checkArity("taskm."+name, 1, len(args), pos); err != nil {
+				return nil, err
+			}
+			if args[0].Kind != tTask && args[0].Kind != tInt {
+				return nil, c.errf(pos, "TypeError: taskm.%s requires a Task or pid, got %s", name, args[0])
+			}
+			return tFuncBufferV, nil
+		case "done":
+			if err := c.checkArity("taskm.done", 1, len(args), pos); err != nil {
+				return nil, err
+			}
+			if args[0].Kind != tInt {
+				return nil, c.errf(pos, "TypeError: taskm.done requires a pid (int), got %s", args[0])
+			}
+			return tBoolV, nil
+		case "channel":
+			if len(args) == 1 {
+				if args[0].Kind != tInt {
+					return nil, c.errf(pos, "TypeError: taskm.channel(n) requires an int capacity, got %s", args[0])
+				}
+			} else if len(args) != 0 {
+				return nil, c.errf(pos, "CompileError: taskm.channel() expects 0 or 1 args, got %d", len(args))
+			}
+			return tChannelV, nil
 		}
 	case tStruct:
 		def, ok := c.impls[recv.FName]
@@ -1180,40 +1246,23 @@ func (c *checker) inferScope(x *ScopeCall, sc *cScope) (*Type, error) {
 		}
 		return nil, c.errf(x.Pos, "TypeError: IO has no static method %q", x.Name)
 	case "taskm":
-		switch x.Name {
-		case "spawn":
-			if len(args) < 1 {
-				return nil, c.errf(x.Pos, "CompileError: taskm::spawn requires a function reference as first arg")
-			}
-			if args[0].Kind != tFunc {
-				return nil, c.errf(x.Pos, "TypeError: taskm::spawn requires a function reference, got %s", args[0])
-			}
-			if args[0].FName != "" {
-				if fn, ok := c.fns[args[0].FName]; ok {
-					if err := c.checkCallArgs(fn, x.Args[1:], sc, x.Pos); err != nil {
-						return nil, err
-					}
-				}
-			}
-			return tTaskV, nil
-		case "block":
-			if err := c.checkArity("taskm::block", 1, len(args), x.Pos); err != nil {
-				return nil, err
-			}
-			if args[0].Kind != tTask {
-				return nil, c.errf(x.Pos, "TypeError: taskm::block requires a Task, got %s", args[0])
-			}
-			return tFuncBufferV, nil
-		case "channel":
-			if err := c.checkArity("taskm::channel", 0, len(args), x.Pos); err != nil {
-				return nil, err
-			}
-			return tChannelV, nil
-		}
-		return nil, c.errf(x.Pos, "TypeError: taskm has no static method %q", x.Name)
+		// taskm 是全局变量：正确语法是 taskm.spawn(...) 等
+		return nil, c.errf(x.Pos, "TypeError: taskm is a global variable — use taskm.spawn(...) / taskm.block(pid) / taskm.done(pid) / taskm.merge(pid) / taskm.channel([n])")
 	case "GlobalMemory":
-		if x.Name == "compact" && len(args) == 0 {
-			return tIntV, nil
+		switch x.Name {
+		case "compact":
+			if err := c.checkArity("GlobalMemory::compact", 0, len(args), x.Pos); err != nil {
+				return nil, err
+			}
+			return tNilV, nil // compact() 根本不返回
+		case "setBlock":
+			if err := c.checkArity("GlobalMemory::setBlock", 1, len(args), x.Pos); err != nil {
+				return nil, err
+			}
+			if args[0].Kind != tInt {
+				return nil, c.errf(x.Pos, "TypeError: GlobalMemory::setBlock(n) requires an int, got %s", args[0])
+			}
+			return tNilV, nil
 		}
 		return nil, c.errf(x.Pos, "TypeError: GlobalMemory has no static method %q", x.Name)
 	}

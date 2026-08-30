@@ -295,19 +295,21 @@ func main(io IOStream) {
 func TestMemoryCompactStub(t *testing.T) {
 	out, err := runSrc(t, `
 func main(io IOStream) {
-    io.println(GlobalMemory::compact());
-    io.println(memory.compact());
+    GlobalMemory::compact();
+    memory.setBlock(512);
+    GlobalMemory::setBlock(1024);
+    io.println("ok");
 }`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "0\n0\n"
+	want := "ok\n"
 	if out != want {
 		t.Fatalf("got %q want %q", out, want)
 	}
 }
 
-// @async() 签名：返回 Task；taskm::block 取回完整 FuncBuffer；调度事件自动日志
+// @async() 签名：返回 Task；taskm.block 取回完整 FuncBuffer；调度事件自动日志
 func TestAsyncBlock(t *testing.T) {
 	out, err := runSrc(t, `
 func expensive(n int) {
@@ -316,7 +318,7 @@ func expensive(n int) {
 
 func main(io IOStream) {
     t Task = expensive(41) @async();
-    fb FuncBuffer = taskm::block(t);
+    fb FuncBuffer = taskm.block(t);
     io.println(*fb.tail);
     while (fb.log.head() != fb.log.tail()) {
         io.println(fb.log.next());
@@ -325,7 +327,7 @@ func main(io IOStream) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "1681\nasync: spawned expensive(41)\nasync: done\n"
+	want := "1681\nasync: spawned expensive(41) pid=1\nasync: done\n"
 	if out != want {
 		t.Fatalf("got %q want %q", out, want)
 	}
@@ -340,11 +342,11 @@ func worker(c Channel) {
 }
 
 func main(io IOStream) {
-    c Channel = taskm::channel();
+    c Channel = taskm.channel();
     t Task = worker(c) @async();
     io.println(t.done());
     c.send(42);
-    fb FuncBuffer = taskm::block(t);
+    fb FuncBuffer = taskm.block(t);
     io.println(*fb.tail);
 }`)
 	if err != nil {
@@ -356,7 +358,7 @@ func main(io IOStream) {
 	}
 }
 
-// taskm::spawn(fn, args...) 显式启动（函数引用）
+// taskm.spawn(fn, args...) 显式启动（返回 pid）
 func TestTaskSpawn(t *testing.T) {
 	out, err := runSrc(t, `
 func add(a int, b int) {
@@ -364,45 +366,40 @@ func add(a int, b int) {
 }
 
 func main(io IOStream) {
-    t Task = taskm::spawn(add, 3, 4);
-    fb FuncBuffer = taskm::block(t);
+    pid int = taskm.spawn(add, 3, 4);
+    fb FuncBuffer = taskm.block(pid);
     io.println(*fb.tail);
+    io.println(taskm.done(pid));
 }`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "7\n"
+	want := "7\ntrue\n"
 	if out != want {
 		t.Fatalf("got %q want %q", out, want)
 	}
 }
 
-// yield; 协作式切换点 + 自动日志
-func TestYield(t *testing.T) {
+// channel 容量：taskm.channel(n) 指定容量（spec §14.2，默认 1024）
+func TestChannelCapacity(t *testing.T) {
 	out, err := runSrc(t, `
-func worker() {
-    yield;
-    out 1;
-}
-
 func main(io IOStream) {
-    t Task = worker() @async();
-    fb FuncBuffer = taskm::block(t);
-    io.println(*fb.tail);
-    while (fb.log.head() != fb.log.tail()) {
-        io.println(fb.log.next());
-    }
+    c Channel = taskm.channel(2);
+    c.send(1);
+    c.send(2);
+    io.println(c.recv());
+    io.println(c.recv());
 }`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "1\nasync: spawned worker()\nyield\nasync: done\n"
+	want := "1\n2\n"
 	if out != want {
 		t.Fatalf("got %q want %q", out, want)
 	}
 }
 
-// 协程内错误通过 taskm::block 传播（带 FB 供 log 回放）
+// 协程内错误通过 taskm.block 传播（带 FB 供 log 回放）
 func TestAsyncErrorPropagates(t *testing.T) {
 	_, err := runSrc(t, `
 func bad() {
@@ -413,7 +410,7 @@ func bad() {
 
 func main(io IOStream) {
     t Task = bad() @async();
-    fb FuncBuffer = taskm::block(t);
+    fb FuncBuffer = taskm.block(t);
 }`)
 	if err == nil || !strings.Contains(err.Error(), "ListExhaustedError") {
 		t.Fatalf("got %v", err)
@@ -431,8 +428,8 @@ func writer(io IOStream, tag String) {
 func main(io IOStream) {
     t1 Task = writer(io, "A") @async();
     t2 Task = writer(io, "B") @async();
-    taskm::block(t1);
-    taskm::block(t2);
+    taskm.block(t1);
+    taskm.block(t2);
 }`)
 	if err != nil {
 		t.Fatal(err)

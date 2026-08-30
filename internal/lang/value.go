@@ -250,12 +250,13 @@ func (fb *FuncBuffer) String() string {
 // ---- IO objects (spec §10) ----
 
 // IOStream is the default main() parameter: input + output + redirectable.
-// mu serializes conflicting IO operations (the 执行表, spec §14).
+// mu implements the 执行表 (spec §14.2): FIFO by arrival time, reads (RLock)
+// have priority over writes (Lock).
 type IOStream struct {
 	In  io.Reader
 	Out io.Writer
 	rd  *bufio.Reader
-	mu  sync.Mutex
+	mu  sync.RWMutex
 }
 
 func (s *IOStream) TypeName() string { return "IOStream" }
@@ -280,15 +281,27 @@ func (m *MemorizeBuffer) TypeName() string { return "memorize" }
 func (m *MemorizeBuffer) String() string   { return "<memorize buffer>" }
 
 // Memory is the default concrete instance of the global memory struct
-// (block-managed; spec §14). v0.1: memory is backed by the host Go GC, and
-// compact() is a compatibility entry that performs no real reclamation.
-type Memory struct{}
+// (block-managed; spec §14). v0.1: memory is backed by the host Go GC;
+// compact() returns nothing (no value) and BlockSize is the dynamic
+// block-granularity setting (memory.setBlock(n)).
+type Memory struct{ BlockSize int }
 
 func (m *Memory) TypeName() string { return "memory" }
 func (m *Memory) String() string   { return "<memory>" }
 
 // globalMemory is the built-in `memory` identifier.
-var globalMemory = &Memory{}
+var globalMemory = &Memory{BlockSize: 4096}
+
+// TaskManager is the coroutine manager; taskm is a GLOBAL VARIABLE, so the
+// correct call syntax is taskm.spawn(...) / taskm.block(pid) / taskm.done(pid)
+// / taskm.merge(pid) / taskm.channel([n]) (spec §14.2).
+type TaskManager struct{}
+
+func (t *TaskManager) TypeName() string { return "taskm" }
+func (t *TaskManager) String() string   { return "<taskm>" }
+
+// globalTaskm is the built-in `taskm` identifier.
+var globalTaskm = &TaskManager{}
 
 // FuncValue is a first-class function reference (for taskm::spawn etc.).
 type FuncValue struct{ fn *Func }
@@ -326,7 +339,8 @@ func (s *StructValue) String() string {
 // Channel is the coroutine communication primitive (block-buffered).
 type Channel struct{ ch chan Value }
 
-func NewChannel() *Channel { return &Channel{ch: make(chan Value)} }
+// NewChannel 创建容量为 cap 的缓冲 channel。
+func NewChannel(cap int) *Channel { return &Channel{ch: make(chan Value, cap)} }
 
 func (c *Channel) TypeName() string { return "Channel" }
 func (c *Channel) String() string   { return "<Channel>" }

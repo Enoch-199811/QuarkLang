@@ -86,10 +86,16 @@ type Expr interface{ isExpr() }
 // ---- statements ----
 
 type ExprStmt struct{ X Expr }
-type OutStmt struct{ X Expr }
 type LogStmt struct {
 	X   Expr
 	Pos Pos
+}
+type TryStmt struct {
+	Try          *Block
+	CatchVar     string
+	CatchVarType string
+	Catch        *Block
+	Pos          Pos
 }
 type ReturnStmt struct {
 	X   Expr // nil X = bare return
@@ -123,8 +129,8 @@ type AssignStmt struct {
 }
 
 func (*ExprStmt) isStmt()   {}
-func (*OutStmt) isStmt()    {}
 func (*LogStmt) isStmt()    {}
+func (*TryStmt) isStmt()    {}
 func (*ReturnStmt) isStmt() {}
 func (*IfStmt) isStmt()     {}
 func (*WhileStmt) isStmt()  {}
@@ -157,6 +163,14 @@ type Ident struct {
 }
 type ListLit struct {
 	Items []Expr
+}
+type StructLit struct {
+	Fields []StructLitField
+	Pos    Pos
+}
+type StructLitField struct {
+	Name string
+	X    Expr
 }
 type BinOp struct {
 	Op   string
@@ -202,6 +216,7 @@ func (*BoolLit) isExpr()    {}
 func (*NullLit) isExpr()    {}
 func (*Ident) isExpr()      {}
 func (*ListLit) isExpr()    {}
+func (*StructLit) isExpr()  {}
 func (*BinOp) isExpr()      {}
 func (*UnOp) isExpr()       {}
 func (*CallExpr) isExpr()   {}

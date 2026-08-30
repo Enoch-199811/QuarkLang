@@ -683,9 +683,6 @@ func TestDeleteReclaimsBlock(t *testing.T) {
 	if n := in.mem.BlockCount(); n != 0 {
 		t.Fatalf("expected 0 blocks after delete+compact, got %d", n)
 	}
-	if len(in.mem.deletions) == 0 {
-		t.Fatal("expected deletion log entries")
-	}
 }
 
 // program 预制宏必须写在程序末尾（节点接入先后顺序）

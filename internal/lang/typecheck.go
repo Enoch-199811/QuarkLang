@@ -220,10 +220,12 @@ func parseTypeStr(s string) (*Type, error) {
 		return tFuncBufferV, nil
 	case "IOStream":
 		return tIOStreamV, nil
-	case "InputStream":
+	case "InputStream", "istream", "ifstream":
 		return tInputStreamV, nil
-	case "OutputStream":
+	case "OutputStream", "ostream", "ofstream":
 		return tOutputStreamV, nil
+	case "iofstream":
+		return tInputStreamV, nil // v1：双向文件流按输入流类型（对象兼具读写）
 	case "Channel":
 		return tChannelV, nil
 	case "Task", "thread":
@@ -550,10 +552,12 @@ func (c *checker) substType(s string, subst map[string]*Type, pos Pos) (*Type, e
 		return tFuncBufferV, nil
 	case "IOStream":
 		return tIOStreamV, nil
-	case "InputStream":
+	case "InputStream", "istream", "ifstream":
 		return tInputStreamV, nil
-	case "OutputStream":
+	case "OutputStream", "ostream", "ofstream":
 		return tOutputStreamV, nil
+	case "iofstream":
+		return tInputStreamV, nil // v1：双向文件流按输入流类型（对象兼具读写）
 	case "Channel":
 		return tChannelV, nil
 	case "Task", "thread":
@@ -1262,6 +1266,34 @@ func (c *checker) methodType(recv *Type, name string, args []*Type, pos Pos) (*T
 			}
 			return tFuncBufferV, nil
 		}
+	case tInputStream:
+		switch name {
+		case "readln":
+			if err := c.checkArity(name, 0, len(args), pos); err != nil {
+				return nil, err
+			}
+			return tStringV, nil
+		case "close":
+			if err := c.checkArity(name, 0, len(args), pos); err != nil {
+				return nil, err
+			}
+			return tNilV, nil
+		}
+	case tOutputStream:
+		switch name {
+		case "println", "print":
+			return tNilV, nil
+		case "write":
+			if err := c.checkArity(name, 1, len(args), pos); err != nil {
+				return nil, err
+			}
+			return tNilV, nil
+		case "close":
+			if err := c.checkArity(name, 0, len(args), pos); err != nil {
+				return nil, err
+			}
+			return tNilV, nil
+		}
 	case tIOStream:
 		switch name {
 		case "println", "print":
@@ -1528,7 +1560,7 @@ func (c *checker) inferCall(x *CallExpr, sc *cScope) (*Type, error) {
 		return tFuncBufferV, nil
 	}
 	switch id.Name {
-	case "FileInputStream":
+	case "FileInputStream", "ifstream", "iofstream":
 		if err := c.checkArity("FileInputStream", 1, len(args), id.Pos); err != nil {
 			return nil, err
 		}
@@ -1536,7 +1568,7 @@ func (c *checker) inferCall(x *CallExpr, sc *cScope) (*Type, error) {
 			return nil, c.errf(id.Pos, "TypeError: FileInputStream requires a path String, got %s", args[0])
 		}
 		return tInputStreamV, nil
-	case "FileOutputStream":
+	case "FileOutputStream", "ofstream":
 		if err := c.checkArity("FileOutputStream", 1, len(args), id.Pos); err != nil {
 			return nil, err
 		}

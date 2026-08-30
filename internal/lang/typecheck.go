@@ -43,10 +43,10 @@ type Type struct {
 	Args  []*Type // tStruct: 泛型实例实参
 }
 
-func mk(k tKind) *Type                 { return &Type{Kind: k} }
-func mkList(e *Type) *Type             { return &Type{Kind: tList, Elem: e} }
-func mkTable(k, v *Type) *Type         { return &Type{Kind: tHashTable, Key: k, Val: v} }
-func mkFunc(name string) *Type         { return &Type{Kind: tFunc, FName: name} }
+func mk(k tKind) *Type         { return &Type{Kind: k} }
+func mkList(e *Type) *Type     { return &Type{Kind: tList, Elem: e} }
+func mkTable(k, v *Type) *Type { return &Type{Kind: tHashTable, Key: k, Val: v} }
+func mkFunc(name string) *Type { return &Type{Kind: tFunc, FName: name} }
 
 var (
 	tIntV          = mk(tInt)

@@ -61,6 +61,8 @@ const (
 	TNull
 	TTry
 	TCatch
+	TSharp
+	TMacro
 )
 
 var tokenNames = [...]string{
@@ -69,7 +71,7 @@ var tokenNames = [...]string{
 	"'while'", "'for'", "'in'", "'true'", "'false'",
 	"'('", "')'", "'{'", "'}'", "'['", "']'", "';'", "','", "'.'", "':'", "'::'", "'@'",
 	"'='", "'+'", "'-'", "'*'", "'/'", "'%'", "'!'", "'=='", "'!='", "'<'", "'<='", "'>'", "'>='", "'&&'", "'||'",
-	"'log'", "'&'", "'null'", "'try'", "'catch'",
+	"'log'", "'&'", "'null'", "'try'", "'catch'", "'#'", "'macro'",
 }
 
 func (k TokenKind) String() string {
@@ -118,6 +120,7 @@ var keywords = map[string]TokenKind{
 	"null":      TNull,
 	"try":       TTry,
 	"catch":     TCatch,
+	"macro":     TMacro,
 }
 
 type lexer struct {
@@ -231,6 +234,8 @@ func (lx *lexer) next() (Token, error) {
 		return Token{Kind: k, Text: string(c), Line: line, Col: col}, nil
 	}
 	switch c {
+	case '#':
+		return one(TSharp)
 	case '(':
 		return one(TLParen)
 	case ')':

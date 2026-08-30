@@ -250,6 +250,9 @@ func runWithInterp(prog *Program, filename string, args []string, stdin io.Reade
 	}
 	in.registerIOBuiltins()
 
+	if prog.Kind == "library" {
+		return nil, fmt.Errorf("RunError: #error (\"cannot run a library\"): program library; 编译为库，不可运行")
+	}
 	mainFn, ok := in.fns["main"]
 	if !ok {
 		return nil, fmt.Errorf("CompileError: no main function found (expected: func main(io IOStream, ...))")

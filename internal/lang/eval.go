@@ -13,9 +13,9 @@ import (
 // RunError is a runtime (or strict-check) error with source position and,
 // when available, the execCtx whose log explains what happened.
 type RunError struct {
-	Msg  string
-	Pos  Pos
-	Ctx  *execCtx
+	Msg string
+	Pos Pos
+	Ctx *execCtx
 }
 
 func (e *RunError) Error() string {
@@ -373,12 +373,13 @@ func (in *interp) execStmt(st Stmt, sc *scope, ctx *execCtx) error {
 		_, err := in.evalExpr(s.X, sc, ctx)
 		return err
 	case *LogStmt:
-		// log 记录日志并结束函数（返回什么都可以）
+		// log 记录日志并结束函数（返回任意值，默认 nil）
 		v, err := in.evalExpr(s.X, sc, ctx)
 		if err != nil {
 			return err
 		}
 		ctx.Log.Append(StrV(v.String()))
+		ctx.result = NilV{}
 		return errReturn
 	case *TryStmt:
 		// try/catch：try 块出错（非 return）时把错误装入 catch 变量（interface{}），执行 catch 块
@@ -775,6 +776,9 @@ func (in *interp) callFunc(fn *Func, args []Value, pos Pos) (Value, error) {
 	ctx := NewExecCtx(fn, args, pos)
 	if err := in.execute(ctx); err != nil {
 		return nil, err
+	}
+	if ctx.result == nil {
+		return NilV{}, nil // 未 return 的路径（log 结束等）返回 nil
 	}
 	return ctx.result, nil
 }

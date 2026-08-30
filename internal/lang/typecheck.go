@@ -948,6 +948,9 @@ func (c *checker) infer(e Expr, sc *cScope) (*Type, error) {
 		if x.Name == "taskm" {
 			return tTaskmV, nil
 		}
+		if x.Name == "DynamicStackAndHeap" {
+			return tStringV, nil // 实验内存模式常量（xmind §内存）
+		}
 		if v := sc.lookup(x.Name); v != nil {
 			if !v.init {
 				return nil, c.errf(x.Pos, "CompileError: variable %q used before initialization", x.Name)
@@ -1307,6 +1310,16 @@ func (c *checker) methodType(recv *Type, name string, args []*Type, pos Pos) (*T
 		}
 	case tMemory:
 		switch name {
+		case "clear":
+			if err := c.checkArity(name, 0, len(args), pos); err != nil {
+				return nil, err
+			}
+			return tNilV, nil
+		case "mode":
+			if err := c.checkArity(name, 1, len(args), pos); err != nil {
+				return nil, err
+			}
+			return tNilV, nil
 		case "compact":
 			if err := c.checkArity(name, 0, len(args), pos); err != nil {
 				return nil, err
@@ -1631,6 +1644,16 @@ func (c *checker) inferScope(x *ScopeCall, sc *cScope) (*Type, error) {
 		return nil, c.errf(x.Pos, "TypeError: taskm is a global variable — use taskm.spawn(...) / taskm.block(pid) / taskm.done(pid) / taskm.merge(pid) / taskm.channel([n])")
 	case "GlobalMemory":
 		switch x.Name {
+		case "clear":
+			if err := c.checkArity("GlobalMemory::clear", 0, len(args), x.Pos); err != nil {
+				return nil, err
+			}
+			return tNilV, nil
+		case "mode":
+			if err := c.checkArity("GlobalMemory::mode", 1, len(args), x.Pos); err != nil {
+				return nil, err
+			}
+			return tNilV, nil
 		case "compact":
 			if err := c.checkArity("GlobalMemory::compact", 0, len(args), x.Pos); err != nil {
 				return nil, err

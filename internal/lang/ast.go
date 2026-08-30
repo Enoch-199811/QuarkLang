@@ -12,6 +12,16 @@ type Program struct {
 	Structs    []*StructDecl
 	Interfaces []*InterfaceDecl
 	Impls      []*ImplDecl
+	Kind       string // "main"（默认）| "library"（program 宏）
+	Imports    []string
+	Pub        []string // pub 宏：库中公开的符号名
+}
+
+// MacroDef 是 macro {模式} {主体} 定义（模式/主体均为 token 序列）。
+type MacroDef struct {
+	Pattern []Token
+	Body    []Token
+	Pos     Pos
 }
 
 // FuncDecl is a top-level function declaration. Ret is the optional return

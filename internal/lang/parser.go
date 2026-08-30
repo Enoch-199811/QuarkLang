@@ -31,7 +31,18 @@ func Compile(src string) (*Program, error) {
 	if err != nil {
 		return nil, err
 	}
-	prog, err := Parse(toks)
+	// 宏系统：切出 macro 定义，token 级展开（解释器为 run 态），再解析
+	macros, rest, err := SplitMacroDefs(toks)
+	if err != nil {
+		return nil, err
+	}
+	if len(macros) > 0 {
+		rest, err = ExpandMacros(rest, macros, "run")
+		if err != nil {
+			return nil, err
+		}
+	}
+	prog, err := Parse(rest)
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +132,67 @@ func (p *parser) parseProgram() (*Program, error) {
 			}
 			prog.Impls = append(prog.Impls, im)
 		default:
-			return nil, p.errf(p.cur(), "expected a top-level declaration (func/struct/impl/interface), got %s", p.cur().Kind)
+			if p.cur().Kind == TIdent {
+				switch p.cur().Text {
+				case "program":
+					// 预制宏：program main; / program library;
+					p.advance()
+					kind, err := p.expectIdent("program kind (main|library)")
+					if err != nil {
+						return nil, err
+					}
+					if kind.Text != "main" && kind.Text != "library" {
+						return nil, p.errf(kind, "program 只支持 main 或 library，got %q", kind.Text)
+					}
+					if _, err := p.expect(TSemi, "';'"); err != nil {
+						return nil, err
+					}
+					prog.Kind = kind.Text
+					continue
+				case "import":
+					// 预制宏：import path;（同目录默认在搜索范围）
+					p.advance()
+					var path string
+					if p.cur().Kind == TStr {
+						path = p.cur().Text
+						p.advance()
+					} else {
+						n, err := p.expectIdent("import path")
+						if err != nil {
+							return nil, err
+						}
+						path = n.Text
+					}
+					if _, err := p.expect(TSemi, "';'"); err != nil {
+						return nil, err
+					}
+					prog.Imports = append(prog.Imports, path)
+					continue
+				case "pub":
+					// 预制宏：pub 前缀，公开下一个顶层符号
+					p.advance()
+					if p.cur().Kind != TFunc && p.cur().Kind != TStruct {
+						return nil, p.errf(p.cur(), "pub 只能前缀于 func/struct")
+					}
+					if p.cur().Kind == TFunc {
+						fn, err := p.parseFunc()
+						if err != nil {
+							return nil, err
+						}
+						prog.Pub = append(prog.Pub, fn.Name)
+						prog.Funcs = append(prog.Funcs, fn)
+					} else {
+						sd, err := p.parseStruct()
+						if err != nil {
+							return nil, err
+						}
+						prog.Pub = append(prog.Pub, sd.Name)
+						prog.Structs = append(prog.Structs, sd)
+					}
+					continue
+				}
+			}
+			return nil, p.errf(p.cur(), "expected a top-level declaration (func/struct/impl/interface/program/import/pub), got %s", p.cur().Kind)
 		}
 	}
 	return prog, nil

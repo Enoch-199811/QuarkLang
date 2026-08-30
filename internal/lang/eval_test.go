@@ -537,3 +537,127 @@ func TestIORedirect(t *testing.T) {
 		t.Fatalf("got %q", b)
 	}
 }
+
+// ============ 宏系统 ============
+
+// 自定义宏：模式 + ... 通配捕获，#when(run) 插入捕获内容
+func TestMacroInsertRun(t *testing.T) {
+	out, err := runSrc(t, `macro {emit ...} {
+    #when (run) {
+        #insert(#ast(...))
+    }
+}
+
+func main(io IOStream) {
+    emit io.println("hello from macro");
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "hello from macro\n" {
+		t.Fatalf("got %q", out)
+	}
+}
+
+// #when(compile) 块在运行态被丢弃
+func TestMacroWhenCompileDropped(t *testing.T) {
+	out, err := runSrc(t, `macro {only ...} {
+    #when (compile) { io.println("COMPILE-ONLY"); }
+    #when (run) {
+        #insert(#ast(...))
+    }
+}
+
+func main(io IOStream) {
+    only io.println("run-line");
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "run-line\n" {
+		t.Fatalf("got %q", out)
+	}
+}
+
+// #error 在选中的预处理分支中直接报错
+func TestMacroErrorDirective(t *testing.T) {
+	_, err := runSrc(t, `macro {bad ...} {
+    #when (run) {
+        #error("cannot do this at run time")
+    }
+}
+
+func main(io IOStream) {
+    bad io.println("x");
+}`)
+	if err == nil || !strings.Contains(err.Error(), "cannot do this at run time") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// program library; 编译为库，运行时报错
+func TestProgramLibraryNotRunnable(t *testing.T) {
+	_, err := runSrc(t, `program library;
+
+func main(io IOStream) {
+    io.println("never");
+}`)
+	if err == nil || !strings.Contains(err.Error(), "cannot run a library") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// program main; 正常运行
+func TestProgramMain(t *testing.T) {
+	out, err := runSrc(t, `program main;
+
+func main(io IOStream) {
+    io.println("ok");
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "ok\n" {
+		t.Fatalf("got %q", out)
+	}
+}
+
+// pub / import 预制宏：解析层记录
+func TestPubAndImportParse(t *testing.T) {
+	prog, err := Compile(`import "util";
+program library;
+
+pub func add(a int, b int) int {
+    return a + b;
+}
+
+pub struct {
+    x int;
+} Box;
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prog.Kind != "library" {
+		t.Fatalf("Kind = %q", prog.Kind)
+	}
+	if len(prog.Imports) != 1 || prog.Imports[0] != "util" {
+		t.Fatalf("Imports = %v", prog.Imports)
+	}
+	if len(prog.Pub) != 2 || prog.Pub[0] != "add" || prog.Pub[1] != "Box" {
+		t.Fatalf("Pub = %v", prog.Pub)
+	}
+}
+
+// 宏模式内不允许嵌套大括号
+func TestMacroNoNestedBraceInPattern(t *testing.T) {
+	_, err := Compile(`macro {oops {x}} {
+    #when (run) { }
+}
+func main(io IOStream) {
+    io.println(1);
+}`)
+	if err == nil || !strings.Contains(err.Error(), "不能再嵌套大括号") {
+		t.Fatalf("got %v", err)
+	}
+}

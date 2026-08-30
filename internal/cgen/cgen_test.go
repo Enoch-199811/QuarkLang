@@ -76,3 +76,84 @@ func TestLLIPipeline(t *testing.T) {
 		}
 	}
 }
+
+// llvm-as 语法校验：生成的 IR 必须通过 LLVM 官方语法检查
+func TestIRSyntax(t *testing.T) {
+	llvmAs, err := exec.LookPath("llvm-as")
+	if err != nil {
+		t.Skip("llvm-as not available")
+	}
+	progs := []string{
+		"func main(io IOStream) {\n    io.println(\"Hello World!\");\n}\n",
+		"func main(io IOStream) {\n    io.println(1 + 2 * 3, \"=\");\n}\n",
+		"func main(io IOStream) {\n    io.println(-5 + 3, 7 % 3);\n}\n",
+		"func main(io IOStream) {\n    io.println(\"a\\nb\", \"q\\\"q\");\n}\n",
+	}
+	for _, src := range progs {
+		ir, err := Transpile(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, err := os.CreateTemp("", "quark-syn-*.ll")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteString(ir); err != nil {
+			t.Fatal(err)
+		}
+		name := f.Name()
+		f.Close()
+		defer os.Remove(name)
+		if out, err := exec.Command(llvmAs, name, "-o", os.DevNull).CombinedOutput(); err != nil {
+			t.Fatalf("llvm-as rejected IR: %v\n%s\nIR:\n%s", err, out, ir)
+		}
+	}
+}
+
+// 一元负号 + 取模（lli 全链路）
+func TestUnaryMinusAndModulo(t *testing.T) {
+	lli, err := exec.LookPath("lli")
+	if err != nil {
+		t.Skip("lli not available")
+	}
+	ir, err := Transpile("func main(io IOStream) {\n    io.println(-5 + 3, 7 % 3);\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, _ := os.CreateTemp("", "quark-neg-*.ll")
+	f.WriteString(ir)
+	name := f.Name()
+	f.Close()
+	defer os.Remove(name)
+	out, err := exec.Command(lli, name).CombinedOutput()
+	if err != nil {
+		t.Fatalf("lli: %v\nIR:\n%s", err, ir)
+	}
+	if string(out) != "-2 1\n" {
+		t.Fatalf("got %q, IR:\n%s", out, ir)
+	}
+}
+
+// 字符串转义（\n、\"）→ IR 转义 → 运行时还原
+func TestStringEscapes(t *testing.T) {
+	lli, err := exec.LookPath("lli")
+	if err != nil {
+		t.Skip("lli not available")
+	}
+	ir, err := Transpile("func main(io IOStream) {\n    io.println(\"a\\nb\", \"q\\\"q\");\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, _ := os.CreateTemp("", "quark-esc-*.ll")
+	f.WriteString(ir)
+	name := f.Name()
+	f.Close()
+	defer os.Remove(name)
+	out, err := exec.Command(lli, name).CombinedOutput()
+	if err != nil {
+		t.Fatalf("lli: %v\nIR:\n%s", err, ir)
+	}
+	if string(out) != "a\nb q\"q\n" {
+		t.Fatalf("got %q, IR:\n%s", out, ir)
+	}
+}

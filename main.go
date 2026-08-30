@@ -1,6 +1,7 @@
 // qkc：QuarkLang → LLVM IR 编译器（compiler 分支，v0.2）。
 // 用法：qkc file.qk           输出 LLVM IR 到 stdout
-//       qkc -run file.qk      用 clang 编译 IR 为原生二进制并执行
+//
+//	qkc -run file.qk      用 clang 编译 IR 为原生二进制并执行
 package main
 
 import (

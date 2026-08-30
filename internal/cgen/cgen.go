@@ -140,7 +140,7 @@ func (e *emitter) compileExpr(x *expr) (string, bool) {
 	case kBin:
 		l, _ := e.compileExpr(x.l)
 		r, _ := e.compileExpr(x.r)
-		op := map[string]string{"+": "add", "-": "sub", "*": "mul", "/": "sdiv"}[x.op]
+		op := map[string]string{"+": "add", "-": "sub", "*": "mul", "/": "sdiv", "%": "srem"}[x.op]
 		reg := e.newReg()
 		fmt.Fprintf(&e.b, "  %s = %s i32 %s, %s\n", reg, op, l, r)
 		return reg, false
@@ -386,7 +386,7 @@ func (p *parser) parseMul() (*expr, error) {
 	}
 	for {
 		p.skipSpace()
-		if p.pos >= len(p.src) || (p.src[p.pos] != '*' && p.src[p.pos] != '/') {
+		if p.pos >= len(p.src) || (p.src[p.pos] != '*' && p.src[p.pos] != '/' && p.src[p.pos] != '%') {
 			return l, nil
 		}
 		op := string(p.src[p.pos])
@@ -418,18 +418,49 @@ func (p *parser) parsePrimary() (*expr, error) {
 		return &expr{kind: kInt, i: v}, nil
 	case c == '"':
 		p.pos++
-		start := p.pos
-		for p.pos < len(p.src) && p.src[p.pos] != '"' {
+		var sb strings.Builder
+		for {
+			if p.pos >= len(p.src) {
+				return nil, p.errf("unterminated string literal")
+			}
+			ch := p.src[p.pos]
+			if ch == '"' {
+				p.pos++
+				break
+			}
+			if ch == '\\' && p.pos+1 < len(p.src) {
+				n := p.src[p.pos+1]
+				switch n {
+				case 'n':
+					sb.WriteByte('\n')
+				case 't':
+					sb.WriteByte('\t')
+				case 'r':
+					sb.WriteByte('\r')
+				case '"':
+					sb.WriteByte('"')
+				case '\\':
+					sb.WriteByte('\\')
+				default:
+					sb.WriteByte(n)
+				}
+				p.pos += 2
+				continue
+			}
+			sb.WriteByte(ch)
 			p.pos++
 		}
-		if p.pos >= len(p.src) {
-			return nil, p.errf("unterminated string literal")
-		}
-		s := p.src[start:p.pos]
-		p.pos++
-		return &expr{kind: kString, s: s}, nil
+		return &expr{kind: kString, s: sb.String()}, nil
 	case p.isIdentStart(c):
 		return &expr{kind: kIdent, s: p.lexIdent()}, nil
+	case c == '-':
+		// 一元负号：等价于 0 - x
+		p.pos++
+		inner, err := p.parsePrimary()
+		if err != nil {
+			return nil, err
+		}
+		return &expr{kind: kBin, op: "-", l: &expr{kind: kInt}, r: inner}, nil
 	case c == '(':
 		p.pos++
 		e, err := p.parseAdd()

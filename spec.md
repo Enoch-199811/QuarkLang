@@ -38,7 +38,6 @@ funcDecl      := "func" ident "(" [params] ")" block
 block         := "{" { stmt } "}"
 stmt          := exprStmt | "out" expr ";" | "return" [expr] ";"
                | "log" expr ";"
-               | "yield" ";"
                | "if" "(" expr ")" block [ "else" block ]
                | "while" "(" expr ")" block
                | "for" "(" ident ":" expr ")" block   // 语法糖：等价 while + next()
@@ -159,7 +158,7 @@ struct {
 
 log 就是 List<String>，且**只接受手动写入**（解释器不自动记录、不自动输出）：
 - 语句 `log expr;`：把 expr 的字符串形式追加到**当前 FuncBuffer** 的 log（手动调用）；
-- 也可以直接用 `fb.log.append("...")`（log 本身是滚动 List）；
+- 也可以对 FuncBuffer 变量直接用 `变量.log.append("...")`（log 本身是滚动 List）——注意 `fb` 只是示例中的**变量名，不是语法**；函数体内并不能直接引用自己的 FuncBuffer（除非它是参数）。
 - 出错时（§11.2）运行时回放 log 中已有的（手动写入的）内容，帮助定位「为什么运行错了」。
 
 ## 6. 签名与 Sign 接口（★ 核心）
@@ -303,7 +302,9 @@ fb.tail.next();     // [1,2,3]  —— 排序后的副本（调用方的原数�
 - `List`：`head()/tail()/next()/append/appendAll/size/toString`。
 - `HashTable`：`contains/get/put/remove/size`。
 - `List.reset()`：head 直接移回 0（§4）。
-- `GlobalMemory::compact()` / `memory.compact()`：清理无人占用的空间（block 管理，§14）。
+- `GlobalMemory::compact()` / `memory.compact()`：清理无人占用的空间（block 管理，§14）——**不返回任何值**。
+- `GlobalMemory::setBlock(n)` / `memory.setBlock(n)`：动态调整 block 脏标记粒度（区块大小）。
+- `taskm`（全局变量）：`taskm.spawn(fn, args...)` → pid、`taskm.block(pid)` / `taskm.merge(pid)` → FuncBuffer、`taskm.done(pid)` → bool、`taskm.channel([n])` → Channel（默认容量 1024）。
 - （其余内置方法随解释器实现逐步补充。）
 
 ## 10. IO 体系
@@ -420,41 +421,46 @@ func main(io IOStream) {
 - io：协程直接传递 io；IOStream 内置**执行表**，执行时间冲突的操作先入表排队。
 - 回收：协程结束自动标记其 block 可回收；`GlobalMemory.compact()` 手动清理。
 
-仍待确认：
-1. `yield;` 语句语法与切换点清单（阻塞 send/recv、taskm::block 是否也自动切换——暂按「是」实现）。
-2. channel 容量：`taskm::channel()` 无缓冲（当前）还是支持 `taskm::channel(n)` 指定容量。
-3. IOStream「执行表」的细节语义（排队顺序、优先级）。
-4. 调度事件自动日志的完整清单与格式（当前实现：spawn / yield / done 三事件）。
-5. block 级脏标记粒度与 `GlobalMemory.compact()` 返回值语义（真实内存系统轮）。
+已确认（2026-08-30 设计者答复，已合入 §5/§9/§14）：
+1. **没有 yield 语法**（此前为我方臆造，已从语言与实现中删除）；协作等待原语只有 `taskm.block`。
+2. channel 支持指定容量：`taskm.channel(n)`，**默认 1024**。
+3. IOStream 执行表：按到达时间**先进先出**，**优先级读高于写**（v0.1 以读写锁近似实现）。
+4. 调度事件：**done** = 是否结束（`taskm.done(pid)` = 该协程线程是否没有函数占用）；**spawn() 返回 pid**；**merge() 把函数并入线程**（v0.1 等价 block）；**taskm 是全局变量**，正确语法是 `taskm.函数()`（不是 `taskm::`）。
+5. `compact()` **根本不返回**；block 脏标记粒度可用 `memory.setBlock(n)` / `GlobalMemory::setBlock(n)` 动态调整。
+
+（无待确认项。）
 
 已确认（本轮新增，已合入上文）：
 - 数值宽度基本与 C 一致（§3.1 类型表；int=32 位环绕、long=64、float=32、double=64、char=8）。
-- log **只接受手动写入**：`log expr;` 语句 / `fb.log.append(...)`；解释器不自动记录、不自动输出（§5、§11.2 已更新）。
+- log **只接受手动写入**：`log expr;` 语句 / `fb.log.append(...)`；解释器不自动记录、不自动输出（§5、§11.2 已更新）。(fb不是语法，是名字，函数内压根不能直接用)
 
 ## 14. 内存模型与协程
 
 ### 14.1 内存模型（block 管理）
 - 内存由**全局内存管理器**统一管理，以 **block（区块）** 为基本单位。
-- 区块被更改（写入）时会被记录（脏标记）；`GlobalMemory.compact()` 依据这些记录清理**没有人占用的空间**（无引用区块）。
+- 区块被更改（写入）时会被记录（脏标记）；`GlobalMemory.compact()` 依据这些记录清理**没有人占用的空间**（无引用区块）——**compact() 不返回任何值**。
+- block 脏标记粒度可动态调整：`memory.setBlock(n)` / `GlobalMemory::setBlock(n)`。
 - `memory` 是全局内存 struct 的**默认具体实现**（全局实例）。
 - 协程内存同样以 block 为单位、流程一致。
 
 ### 14.2 协程（协作函数）
 - **协程函数就是普通函数**（「函数没有那么特殊」）：没有特殊声明，任何 func 都能作为协程体运行。
+- **taskm 是全局变量**：调用语法是 `taskm.函数()`（**不是** `taskm::`）。
 - **启动两种方式**：
-  1. `taskm::spawn(fn, args...)` —— 显式启动（fn 为函数引用，如 `taskm::spawn(expensive, 41)`）；
-  2. `f(args) @async()` —— 内置**签名** async（与 @memorize 一样本质是包装），直接异步运行。
-- **返回 Task**：`@async()` / `spawn` 返回 Task =「**是否完成 + 完整的函数**」（Task 是 FuncBuffer 的扩展：head/tail/log 齐全）：
-  - `t.done()` → bool（是否完成）；
-  - `taskm::block(t)` → 等待执行完成，返回该协程的完整 FuncBuffer（**结果必须执行完才能拿**）。
+  1. `taskm.spawn(fn, args...)` —— 显式启动（fn 为函数引用，如 `taskm.spawn(expensive, 41)`），**返回 pid**（协程标识）；
+  2. `f(args) @async()` —— 内置**签名** async（与 @memorize 一样本质是包装），直接异步运行，返回 **Task** =「是否完成 + 完整的函数」（Task 是 FuncBuffer 的扩展：head/tail/log 齐全，`t.done()` → bool）。
+- **拿结果（必须执行完才能拿）**：
+  - `taskm.block(pid)` → 等待执行完成，返回该协程的完整 FuncBuffer；
+  - `taskm.merge(pid)` → **把协程函数并入当前线程**并汇合其结果（v0.1 等价于 block）；
+  - `taskm.done(pid)` → bool：该协程的**线程是否空闲（没有函数占用）**，v0.1 即协程是否结束。
 - **协程变量**：协程函数内声明的变量**自动归协程**（协程独立 block 内存）；全局变量仍共享。
-- **调度**：协作式。切换点：显式 `yield;` 语句、channel send/recv 阻塞、taskm::block 等待。
-- **自动日志**：调度事件（spawn / yield / 完成）由运行时**自动写入**协程自己的 log（业务日志仍需手动 `log` 语句）。
-- **通信**：`taskm::channel()` 创建 channel（内部为 block 缓冲），`ch.send(v)` / `ch.recv()`；不可完成时让出（协作式切换点）。
-- **io**：协程直接传递 io；IOStream 内置**执行表**：执行时间冲突的 IO 操作先入表排队、按序执行（并发 IO 串行化）。
+- **调度**：协作式（**没有 yield 语法**）。切换点：channel send/recv 阻塞、`taskm.block` / `taskm.merge` 等待。
+- **自动日志**：调度事件（spawn / done）由运行时**自动写入**协程自己的 log（spawn 事件带 pid；业务日志仍需手动 `log` 语句）。
+- **通信**：`taskm.channel([n])` 创建 channel（**默认容量 1024**，内部为 block 缓冲），`ch.send(v)` / `ch.recv()`；不可完成时让出（协作式切换点）。
+- **io**：协程直接传递 io；IOStream 内置**执行表**：按到达时间**先进先出**，**优先级读高于写**（v0.1 以读写锁近似）。
 - **回收**：协程结束自动标记其 block 可回收；`GlobalMemory.compact()` 手动清理。
 
-解释器状态（v0.1）：内存由宿主 Go GC 管理（`compact()` 为兼容性入口）；协程以 Go goroutine 实现——`@async()`、`taskm::spawn/block/channel`、`yield`、Task、IOStream 执行表（互斥队列）已落地；block 级脏标记与真实回收待内存系统轮。
+解释器状态（v0.1）：内存由宿主 Go GC 管理（`compact()` 无返回值、为兼容性入口，`memory.setBlock(n)` 存字段）；协程以 Go goroutine 实现——`taskm.spawn→pid / block / merge / done(pid) / channel([n] 默认 1024)`、`@async()`、Task（done + 完整 FuncBuffer）、IOStream 执行表（读写锁：FIFO、读优先）、调度事件自动日志（spawn 带 pid / done）已落地；无 yield 语法；block 级脏标记与真实回收待内存系统轮。
 
 ## 15. 实现路线（Go 解释器）
 
@@ -472,6 +478,6 @@ func main(io IOStream) {
 - ✅ 验证：`go test` 35 项全绿（含 `-race` 数据竞争检测）；`examples/` 8 个示例全部正确运行（含 error.qk 的 ListExhaustedError + log 回放、struct.qk 的用户自定义 Sign）。
 - ✅ 2026-08-29：log 仅手动写入（`log expr;` / `fb.log.append(...)`）；int 32 位环绕 + 越界字面量编译错误；`List.reset()`（head→0）。
 - ⏳ 待实现：Copyd<T> 运行时包装与 `.ptr()`；block 级脏标记与真实内存回收（§14 内存系统轮）。
-- ✅ 2026-08-29 协程系统 v0.1：`@async()`、`taskm::spawn/block/channel`、`yield;`、Task（done + 完整 FuncBuffer）、IOStream 执行表（互斥队列串行化并发 IO）、调度事件自动日志（spawn/yield/done）。
+- ✅ 2026-08-30 协程系统修订：taskm 为**全局变量**（`taskm.spawn(...)`→pid、`taskm.block(pid)`/`taskm.merge(pid)`→FuncBuffer、`taskm.done(pid)`→bool、`taskm.channel([n])` 默认容量 1024）；**删除 yield 语法**；IOStream 执行表改为 FIFO + 读优先（读写锁）；`compact()` 无返回值、`memory.setBlock(n)`/`GlobalMemory::setBlock(n)` 动态调整 block 粒度；自动日志（spawn 带 pid / done）。
 - ✅ 2026-08-29 编译期静态类型检查 pass：类型推断 + §11.1 检查前置到编译期（未声明标识符/成员、类型不匹配、签名注册与 Prefix 类型、调用实参个数与类型、使用前未初始化、非 List 施加 `*`/next 等、main 参数个数），错误一律带行号；Array/Copyd 静态归一化为 List（复制语义由运行时按注解处理）。
 - ✅ 2026-08-29 用户自定义 struct/impl/interface：结构体（成员、零值实例、字段读写）、interface（方法签名 + 泛型参数）、impl（self 实例方法用 `.` 调用、无 self 静态方法用 `::` 调用）、`impl Sign` 接口一致性检查（缺 call/参数个数不符 → 编译错误）、带返回类型注解的函数（`func f(...) T` 直接返回 `return` 的值，无注解则返回 FuncBuffer）、用户类型实现 Sign 可作为自定义签名（`f(args) @LocalMemorize(mb)`，spec §6.3 参考实现可作为用户代码运行）。

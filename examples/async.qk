@@ -1,4 +1,4 @@
-// 协程系统：@async()、channel、taskm::block/spawn、调度事件自动日志
+// 协程系统：@async()、taskm 全局变量（spawn→pid/block/done/merge）、channel、自动日志
 func worker(c Channel) {
     v interface{} = c.recv();   // 阻塞等待——协作式切换点
     out v;
@@ -10,19 +10,21 @@ func add(a int, b int) {
 
 func main(io IOStream) {
     // 方式一：@async() 签名直接异步运行，返回 Task（是否完成 + 完整函数）
-    c Channel = taskm::channel();
+    c Channel = taskm.channel();
     t Task = worker(c) @async();
     io.println(t.done());       // false —— worker 阻塞在 recv
     c.send(42);                 // 唤醒 worker
-    fb FuncBuffer = taskm::block(t);   // 结果必须执行完才能拿
+    fb FuncBuffer = taskm.block(t);   // 结果必须执行完才能拿
     io.println(*fb.tail);       // 42
     io.println(t.done());       // true
-    // 调度事件自动日志（spawn/done）可回放：
+    // 调度事件自动日志（spawn/done，带 pid）可回放：
     while (fb.log.head() != fb.log.tail()) {
         io.println(fb.log.next());
     }
-    // 方式二：taskm::spawn 显式启动（函数引用）
-    t2 Task = taskm::spawn(add, 3, 4);
-    fb2 FuncBuffer = taskm::block(t2);
+    // 方式二：taskm.spawn 显式启动——返回 pid
+    pid int = taskm.spawn(add, 3, 4);
+    io.println(taskm.done(pid));       // false 或 true（已完成则 true）
+    fb2 FuncBuffer = taskm.block(pid);
     io.println(*fb2.tail);      // 7
+    io.println(taskm.done(pid));       // true
 }

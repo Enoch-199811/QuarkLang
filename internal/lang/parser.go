@@ -440,12 +440,6 @@ func (p *parser) parseStmt() (Stmt, error) {
 			return nil, err
 		}
 		return &LogStmt{X: x, Pos: Pos{Line: kw.Line, Col: kw.Col}}, nil
-	case TYield:
-		kw := p.advance()
-		if _, err := p.expect(TSemi, "';'"); err != nil {
-			return nil, err
-		}
-		return &YieldStmt{Pos: Pos{Line: kw.Line, Col: kw.Col}}, nil
 	case TReturn:
 		kw := p.advance()
 		pos := Pos{Line: kw.Line, Col: kw.Col}

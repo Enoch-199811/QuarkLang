@@ -57,7 +57,6 @@ const (
 	TAnd
 	TOr
 	TLog
-	TYield
 )
 
 var tokenNames = [...]string{
@@ -66,7 +65,7 @@ var tokenNames = [...]string{
 	"'while'", "'for'", "'in'", "'true'", "'false'",
 	"'('", "')'", "'{'", "'}'", "'['", "']'", "';'", "','", "'.'", "':'", "'::'", "'@'",
 	"'='", "'+'", "'-'", "'*'", "'/'", "'%'", "'!'", "'=='", "'!='", "'<'", "'<='", "'>'", "'>='", "'&&'", "'||'",
-	"'log'", "'yield'",
+	"'log'",
 }
 
 func (k TokenKind) String() string {
@@ -112,7 +111,6 @@ var keywords = map[string]TokenKind{
 	"true":      TTrue,
 	"false":     TFalse,
 	"log":       TLog,
-	"yield":     TYield,
 }
 
 type lexer struct {

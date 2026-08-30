@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"runtime"
 	"strings"
+	"sync"
 )
 
 // RunError is a runtime (or strict-check) error with source position and,
@@ -97,6 +97,9 @@ type interp struct {
 	structs    map[string]*StructDef
 	interfaces map[string]*InterfaceDef
 	impls      map[string]*ImplDef
+	tasks      map[int]*Task
+	taskMu     sync.Mutex
+	nextPid    int
 }
 
 // Run executes prog. args are command-line arguments for main(); stdin/stdout
@@ -112,6 +115,7 @@ func Run(prog *Program, filename string, args []string, stdin io.Reader, stdout 
 		structs:    map[string]*StructDef{},
 		interfaces: map[string]*InterfaceDef{},
 		impls:      map[string]*ImplDef{},
+		tasks:      map[int]*Task{},
 	}
 	for _, f := range prog.Funcs {
 		if _, dup := in.fns[f.Name]; dup {
@@ -293,11 +297,6 @@ func (in *interp) execStmt(st Stmt, sc *scope, fb *FuncBuffer) error {
 		}
 		fb.Log.Append(StrV(v.String()))
 		return nil
-	case *YieldStmt:
-		// 协作式切换点；调度事件自动日志（spec §14）
-		fb.Log.Append(StrV("yield"))
-		runtime.Gosched()
-		return nil
 	case *ReturnStmt:
 		if s.X != nil {
 			v, err := in.evalExpr(s.X, sc, fb)
@@ -420,6 +419,9 @@ func (in *interp) evalExpr(e Expr, sc *scope, fb *FuncBuffer) (Value, error) {
 		}
 		if x.Name == "memory" {
 			return globalMemory, nil
+		}
+		if x.Name == "taskm" {
+			return globalTaskm, nil
 		}
 		v, err := sc.get(x.Name, x.Pos)
 		if err == nil {
@@ -812,13 +814,87 @@ func (in *interp) callMethod(obj Value, name string, args []Value, fb *FuncBuffe
 			}
 			return o, nil
 		}
+	case *TaskManager:
+		switch name {
+		case "spawn":
+			if len(args) < 1 {
+				return nil, wantArity("taskm.spawn", 1, len(args), pos, fb)
+			}
+			fn, err := lookupFunc(args[0], in)
+			if err != nil {
+				return nil, &RunError{Msg: err.Error(), Pos: pos, FB: fb}
+			}
+			argVals := args[1:]
+			if len(argVals) != len(fn.Params) {
+				return nil, &RunError{Msg: fmt.Sprintf("CompileError: %s expects %d args, got %d", fn.Name, len(fn.Params), len(argVals)), Pos: pos, FB: fb}
+			}
+			nfb := NewFuncBuffer(fn, argVals, pos)
+			_, pid := in.spawnTask(nfb)
+			return IntV(pid), nil // spawn() 返回 pid
+		case "block", "merge":
+			// merge(pid)：把协程函数并入当前线程并汇合其结果（v0.1 等价 block）
+			if len(args) != 1 {
+				return nil, wantArity("taskm."+name, 1, len(args), pos, fb)
+			}
+			t, err := in.taskArg(args[0], pos, fb)
+			if err != nil {
+				return nil, err
+			}
+			<-t.doneCh
+			if t.err != nil {
+				return nil, t.err
+			}
+			return t.FuncBuffer, nil
+		case "done":
+			// done(pid)：该协程的线程是否空闲（没有函数占用）；v0.1 = 协程是否结束
+			if len(args) != 1 {
+				return nil, wantArity("taskm.done", 1, len(args), pos, fb)
+			}
+			pid, ok := args[0].(IntV)
+			if !ok {
+				return nil, &RunError{Msg: fmt.Sprintf("TypeError: taskm.done requires a pid (int), got %s", args[0].TypeName()), Pos: pos, FB: fb}
+			}
+			t, ok := in.lookupTask(int(pid))
+			if !ok {
+				return nil, &RunError{Msg: fmt.Sprintf("RuntimeError: unknown task pid %d", int(pid)), Pos: pos, FB: fb}
+			}
+			select {
+			case <-t.doneCh:
+				return BoolV(true), nil
+			default:
+				return BoolV(false), nil
+			}
+		case "channel":
+			cap := 1024 // 默认容量（spec §14.2）
+			if len(args) == 1 {
+				n, ok := args[0].(IntV)
+				if !ok || n < 1 {
+					return nil, &RunError{Msg: "TypeError: taskm.channel(n) requires a positive int capacity", Pos: pos, FB: fb}
+				}
+				cap = int(n)
+			} else if len(args) != 0 {
+				return nil, wantArity("taskm.channel", 0, len(args), pos, fb)
+			}
+			return NewChannel(cap), nil
+		}
 	case *Memory:
-		if name == "compact" {
+		switch name {
+		case "compact":
 			if err := wantArity(name, 0, len(args), pos, fb); err != nil {
 				return nil, err
 			}
-			// v0.1: 内存由宿主 Go GC 管理；兼容性入口，无实际回收
-			return IntV(0), nil
+			// compact() 根本不返回（spec §14.1）；v0.1 由宿主 Go GC 管理内存
+			return NilV{}, nil
+		case "setBlock":
+			if err := wantArity(name, 1, len(args), pos, fb); err != nil {
+				return nil, err
+			}
+			n, ok := args[0].(IntV)
+			if !ok || n < 1 {
+				return nil, &RunError{Msg: "TypeError: setBlock(n) requires a positive int block size", Pos: pos, FB: fb}
+			}
+			o.BlockSize = int(n) // 动态调整 block 脏标记粒度
+			return NilV{}, nil
 		}
 	case *Task:
 		if name == "done" {
@@ -872,9 +948,9 @@ func (in *interp) callMethod(obj Value, name string, args []Value, fb *FuncBuffe
 			if err := wantArity(name, 0, len(args), pos, fb); err != nil {
 				return nil, err
 			}
-			o.mu.Lock()
+			o.mu.RLock()
 			line, err := o.rd.ReadString('\n')
-			o.mu.Unlock()
+			o.mu.RUnlock()
 			if err != nil && line == "" {
 				return nil, &RunError{Msg: "IOError: " + err.Error(), Pos: pos, FB: fb}
 			}
@@ -980,51 +1056,28 @@ func (in *interp) evalScopeCall(x *ScopeCall, sc *scope, fb *FuncBuffer) (Value,
 		}
 		return nil, &RunError{Msg: fmt.Sprintf("TypeError: List has no static method %q", x.Name), Pos: x.Pos, FB: fb}
 	case "GlobalMemory":
-		if x.Name == "compact" && len(args) == 0 {
-			// v0.1: 内存由宿主 Go GC 管理；兼容性入口
-			return IntV(0), nil
+		switch x.Name {
+		case "compact":
+			if len(args) != 0 {
+				return nil, wantArity("GlobalMemory::compact", 0, len(args), x.Pos, fb)
+			}
+			// compact() 根本不返回（spec §14.1）
+			return NilV{}, nil
+		case "setBlock":
+			if len(args) != 1 {
+				return nil, wantArity("GlobalMemory::setBlock", 1, len(args), x.Pos, fb)
+			}
+			n, ok := args[0].(IntV)
+			if !ok || n < 1 {
+				return nil, &RunError{Msg: "TypeError: GlobalMemory::setBlock(n) requires a positive int", Pos: x.Pos, FB: fb}
+			}
+			globalMemory.BlockSize = int(n)
+			return NilV{}, nil
 		}
 		return nil, &RunError{Msg: fmt.Sprintf("TypeError: GlobalMemory has no static method %q", x.Name), Pos: x.Pos, FB: fb}
 	case "taskm":
-		switch x.Name {
-		case "spawn":
-			if len(args) < 1 {
-				return nil, wantArity("taskm::spawn", 1, len(args), x.Pos, fb)
-			}
-			fn, err := lookupFunc(args[0], in)
-			if err != nil {
-				return nil, &RunError{Msg: err.Error(), Pos: x.Pos, FB: fb}
-			}
-			argVals := args[1:]
-			if len(argVals) != len(fn.Params) {
-				return nil, &RunError{Msg: fmt.Sprintf("CompileError: %s expects %d args, got %d", fn.Name, len(fn.Params), len(argVals)), Pos: x.Pos, FB: fb}
-			}
-			nfb := NewFuncBuffer(fn, argVals, x.Pos)
-			t, err := in.spawnTask(nfb)
-			if err != nil {
-				return nil, err
-			}
-			return t, nil
-		case "block":
-			if len(args) != 1 {
-				return nil, wantArity("taskm::block", 1, len(args), x.Pos, fb)
-			}
-			t, ok := args[0].(*Task)
-			if !ok {
-				return nil, &RunError{Msg: fmt.Sprintf("TypeError: taskm::block requires a Task, got %s", args[0].TypeName()), Pos: x.Pos, FB: fb}
-			}
-			<-t.doneCh
-			if t.err != nil {
-				return nil, t.err
-			}
-			return t.FuncBuffer, nil
-		case "channel":
-			if len(args) != 0 {
-				return nil, wantArity("taskm::channel", 0, len(args), x.Pos, fb)
-			}
-			return NewChannel(), nil
-		}
-		return nil, &RunError{Msg: fmt.Sprintf("TypeError: taskm has no static method %q", x.Name), Pos: x.Pos, FB: fb}
+		// taskm 是全局变量：正确语法是 taskm.spawn(...) / taskm.block(...) 等
+		return nil, &RunError{Msg: "TypeError: taskm is a global variable — use taskm.spawn(...) / taskm.block(pid) / taskm.done(pid) / taskm.merge(pid) / taskm.channel([n])", Pos: x.Pos, FB: fb}
 	case "IO":
 		switch x.Name {
 		case "setIn":
@@ -1109,30 +1162,60 @@ func (in *interp) registerIOBuiltins() {
 // asyncCall implements the built-in @async() signature: run the wrapped call
 // as a coroutine and return a Task (done flag + the full FuncBuffer, §14).
 func (in *interp) asyncCall(prefix Value, fb *FuncBuffer) (Value, error) {
-	t, err := in.spawnTask(fb)
-	if err != nil {
-		return nil, err
-	}
+	t, _ := in.spawnTask(fb)
 	return t, nil
 }
 
-// spawnTask starts a coroutine that executes fb. Scheduling events are
-// auto-logged (cooperative functions auto-log, spec §14).
-func (in *interp) spawnTask(fb *FuncBuffer) (*Task, error) {
+// registerTask 登记协程，返回其 pid。
+func (in *interp) registerTask(t *Task) int {
+	in.taskMu.Lock()
+	defer in.taskMu.Unlock()
+	in.nextPid++
+	in.tasks[in.nextPid] = t
+	return in.nextPid
+}
+
+// lookupTask 按 pid 查找协程。
+func (in *interp) lookupTask(pid int) (*Task, bool) {
+	in.taskMu.Lock()
+	defer in.taskMu.Unlock()
+	t, ok := in.tasks[pid]
+	return t, ok
+}
+
+// spawnTask starts a coroutine that executes fb; returns the Task and its pid.
+// Scheduling events are auto-logged (spawn/done, spec §14).
+func (in *interp) spawnTask(fb *FuncBuffer) (*Task, int) {
 	t := &Task{FuncBuffer: fb, doneCh: make(chan struct{})}
+	pid := in.registerTask(t)
 	argStrs := make([]string, 0, fb.Head.Size())
 	for i := 0; i < fb.Head.Size(); i++ {
 		if v, err := fb.Head.Get(i); err == nil {
 			argStrs = append(argStrs, v.String())
 		}
 	}
-	fb.Log.Append(StrV("async: spawned " + fb.Fn.Name + "(" + strings.Join(argStrs, ", ") + ")"))
+	fb.Log.Append(StrV(fmt.Sprintf("async: spawned %s(%s) pid=%d", fb.Fn.Name, strings.Join(argStrs, ", "), pid)))
 	go func() {
 		t.err = in.execute(fb)
 		fb.Log.Append(StrV("async: done"))
 		close(t.doneCh)
 	}()
-	return t, nil
+	return t, pid
+}
+
+// taskArg 接受 Task 或 pid，返回对应协程。
+func (in *interp) taskArg(v Value, pos Pos, fb *FuncBuffer) (*Task, error) {
+	switch a := v.(type) {
+	case *Task:
+		return a, nil
+	case IntV:
+		t, ok := in.lookupTask(int(a))
+		if !ok {
+			return nil, &RunError{Msg: fmt.Sprintf("RuntimeError: unknown task pid %d", int(a)), Pos: pos, FB: fb}
+		}
+		return t, nil
+	}
+	return nil, &RunError{Msg: fmt.Sprintf("TypeError: taskm requires a Task or pid, got %s", v.TypeName()), Pos: pos, FB: fb}
 }
 
 // lookupFunc resolves a function reference (FuncValue or a name string).

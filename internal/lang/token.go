@@ -57,6 +57,8 @@ const (
 	TAnd
 	TOr
 	TLog
+	TAmper
+	TNull
 )
 
 var tokenNames = [...]string{
@@ -65,7 +67,7 @@ var tokenNames = [...]string{
 	"'while'", "'for'", "'in'", "'true'", "'false'",
 	"'('", "')'", "'{'", "'}'", "'['", "']'", "';'", "','", "'.'", "':'", "'::'", "'@'",
 	"'='", "'+'", "'-'", "'*'", "'/'", "'%'", "'!'", "'=='", "'!='", "'<'", "'<='", "'>'", "'>='", "'&&'", "'||'",
-	"'log'",
+	"'log'", "'&'", "'null'",
 }
 
 func (k TokenKind) String() string {
@@ -111,6 +113,7 @@ var keywords = map[string]TokenKind{
 	"true":      TTrue,
 	"false":     TFalse,
 	"log":       TLog,
+	"null":      TNull,
 }
 
 type lexer struct {
@@ -295,7 +298,7 @@ func (lx *lexer) next() (Token, error) {
 			lx.advance()
 			return Token{Kind: TAnd, Text: "&&", Line: line, Col: col}, nil
 		}
-		return Token{}, lx.errf(line, col, "unexpected character '&' (did you mean '&&'?)")
+		return one(TAmper)
 	case '|':
 		if lx.peekByteAt(1) == '|' {
 			lx.advance()

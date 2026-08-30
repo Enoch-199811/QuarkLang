@@ -29,6 +29,9 @@ const (
 	tFunc
 	tStruct
 	tTaskm
+	tPtr
+	tCopyd
+	tNull
 )
 
 type Type struct {
@@ -36,7 +39,8 @@ type Type struct {
 	Elem  *Type
 	Key   *Type
 	Val   *Type
-	FName string // tFunc: 函数名（"" = 未知）
+	FName string  // tFunc: 函数名（"" = 未知）；tStruct: 结构体名
+	Args  []*Type // tStruct: 泛型实例实参
 }
 
 func mk(k tKind) *Type                 { return &Type{Kind: k} }
@@ -67,7 +71,7 @@ var kindName = map[tKind]string{
 	tNil: "nil", tAny: "interface{}", tFuncBuffer: "FuncBuffer",
 	tIOStream: "IOStream", tInputStream: "InputStream", tOutputStream: "OutputStream",
 	tChannel: "Channel", tTask: "Task", tMemorize: "memorize", tMemory: "memory",
-	tFunc: "func", tStruct: "struct", tTaskm: "taskm",
+	tFunc: "func", tStruct: "struct", tTaskm: "taskm", tPtr: "ptr", tCopyd: "Copyd", tNull: "null",
 }
 
 func (t *Type) String() string {
@@ -85,7 +89,20 @@ func (t *Type) String() string {
 		}
 		return "func"
 	case tStruct:
+		if len(t.Args) > 0 {
+			parts := make([]string, len(t.Args))
+			for i, a := range t.Args {
+				parts[i] = a.String()
+			}
+			return t.FName + "<" + strings.Join(parts, ", ") + ">"
+		}
 		return t.FName
+	case tPtr:
+		return t.Elem.String() + "&"
+	case tCopyd:
+		return "Copyd<" + t.Elem.String() + ">"
+	case tNull:
+		return "null"
 	}
 	if n, ok := kindName[t.Kind]; ok {
 		return n
@@ -110,6 +127,23 @@ func assignable(from, to *Type) bool {
 	if from.Kind == tInt && to.Kind == tFloat {
 		return true
 	}
+	// 指针：值可赋给指针；null 可赋给指针
+	if to.Kind == tPtr {
+		if from.Kind == tNull {
+			return true
+		}
+		if from.Kind == tPtr {
+			return assignable(from.Elem, to.Elem) || to.Elem.Kind == tAny || from.Elem.Kind == tAny
+		}
+		return assignable(from, to.Elem) || to.Elem.Kind == tAny
+	}
+	// Copyd：与内部类型互相可赋
+	if from.Kind == tCopyd {
+		return assignable(from.Elem, to)
+	}
+	if to.Kind == tCopyd {
+		return assignable(from, to.Elem)
+	}
 	if from.Kind != to.Kind {
 		return false
 	}
@@ -123,7 +157,20 @@ func assignable(from, to *Type) bool {
 	case tFunc:
 		return to.FName == "" || from.FName == to.FName
 	case tStruct:
-		return from.FName == to.FName
+		if from.FName != to.FName || len(from.Args) != len(to.Args) {
+			return false
+		}
+		for i := range from.Args {
+			a, b := from.Args[i], to.Args[i]
+			if a.Kind != tAny && b.Kind != tAny && !assignable(a, b) {
+				return false
+			}
+		}
+		return true
+	case tPtr:
+		return assignable(from.Elem, to.Elem)
+	case tCopyd:
+		return assignable(from.Elem, to.Elem)
 	}
 	return true
 }
@@ -293,6 +340,7 @@ type checker struct {
 	interfaces map[string]*InterfaceDef
 	impls      map[string]*ImplDef
 	curRet     *Type
+	curSubst   map[string]*Type // 泛型方法体/调用点的类型参数替换
 }
 
 // Typecheck 执行 §11.1 的全部编译期严格检查。
@@ -314,7 +362,7 @@ func Typecheck(prog *Program) error {
 		if _, dup := c.structs[s.Name]; dup {
 			return &CheckError{Msg: fmt.Sprintf("CompileError: duplicate struct %q", s.Name), Pos: s.Pos}
 		}
-		def := &StructDef{Name: s.Name, Types: map[string]string{}}
+		def := &StructDef{Name: s.Name, TypeParams: s.TypeParams, Types: map[string]string{}}
 		for _, m := range s.Members {
 			def.Types[m.Name] = m.Type
 		}
@@ -327,12 +375,26 @@ func Typecheck(prog *Program) error {
 		c.interfaces[i.Name] = &InterfaceDef{Name: i.Name, Methods: i.Methods}
 	}
 	for _, im := range prog.Impls {
+		// 泛型规则：struct 有泛型参数时 impl 必须引入同样的参数；struct 无参数时 impl 不许有
+		if sd, ok := c.structs[im.Type]; ok {
+			if len(sd.TypeParams) > 0 && len(im.TypeParams) != len(sd.TypeParams) {
+				return &CheckError{Msg: fmt.Sprintf("CompileError: struct %s has %d type parameter(s) — impl must introduce the same parameters (impl<T> {...} %s)", im.Type, len(sd.TypeParams), im.Type), Pos: im.Pos}
+			}
+			if len(sd.TypeParams) == 0 && len(im.TypeParams) > 0 {
+				return &CheckError{Msg: fmt.Sprintf("CompileError: struct %s has no type parameters, but impl declares %d", im.Type, len(im.TypeParams)), Pos: im.Pos}
+			}
+		}
 		def, ok := c.impls[im.Type]
 		if !ok {
-			def = &ImplDef{Type: im.Type, Iface: im.Iface, Methods: map[string]*Func{}, SelfMethods: map[string]*Func{}}
+			def = &ImplDef{Type: im.Type, Iface: im.Iface, TypeParams: im.TypeParams, Methods: map[string]*Func{}, SelfMethods: map[string]*Func{}}
 			c.impls[im.Type] = def
-		} else if def.Iface == "" && im.Iface != "" {
-			def.Iface = im.Iface
+		} else {
+			if def.Iface == "" && im.Iface != "" {
+				def.Iface = im.Iface
+			}
+			if len(def.TypeParams) == 0 {
+				def.TypeParams = im.TypeParams
+			}
 		}
 		for _, m := range im.Methods {
 			if len(m.Params) > 0 && m.Params[0].Name == "self" && m.Params[0].Type == "" {
@@ -381,28 +443,179 @@ func Typecheck(prog *Program) error {
 		}
 	}
 	for _, im := range prog.Impls {
+		subst := map[string]*Type{}
+		for _, tp := range im.TypeParams {
+			subst[tp] = tAnyV // 泛型方法体：参数按 interface{} 宽松检查
+		}
+		prev := c.curSubst
+		c.curSubst = subst
 		for _, m := range im.Methods {
 			if err := c.checkFunc(&Func{Name: m.Name, Params: m.Params, Ret: m.Ret, Body: m.Body, Pos: m.Pos}); err != nil {
+				c.curSubst = prev
 				return err
 			}
 		}
+		c.curSubst = prev
 	}
 	return nil
 }
 
-// resolveType 解析类型注解；未知名称回退到已注册的 struct/interface。
+// resolveType 解析类型注解（无替换上下文）。
 func (c *checker) resolveType(s string, pos Pos) (*Type, error) {
-	t, err := parseTypeStr(s)
-	if err == nil {
-		return t, nil
+	return c.substType(s, nil, pos)
+}
+
+// substType 解析类型注解，并对泛型类型参数做替换（subst: 参数名 → 具体类型）。
+// 支持：T（参数名）、T&（指针）、node<T>（泛型实例）、List<T>/HashTable<K,V>、
+// Copyd<T>、int[Copyd]/int[]（≈Copyd<Array>/Array）、null。
+func (c *checker) substType(s string, subst map[string]*Type, pos Pos) (*Type, error) {
+	s = strings.TrimSpace(s)
+	if s == "null" {
+		return &Type{Kind: tNull}, nil
 	}
-	if _, ok := c.structs[s]; ok {
-		return &Type{Kind: tStruct, FName: s}, nil
+	if s == "interface{}" {
+		return tAnyV, nil
 	}
-	if _, ok := c.interfaces[s]; ok {
+	if s == "" {
+		return nil, &CheckError{Msg: "CompileError: empty type annotation", Pos: pos}
+	}
+	// 指针后缀：T&
+	if strings.HasSuffix(s, "&") {
+		e, err := c.substType(strings.TrimSuffix(s, "&"), subst, pos)
+		if err != nil {
+			return nil, err
+		}
+		return &Type{Kind: tPtr, Elem: e}, nil
+	}
+	base, inner, suffix := splitType(s)
+	// 裸类型参数替换（无内层、无后缀）
+	if subst != nil && inner == "" && suffix == "" {
+		if t, ok := subst[base]; ok {
+			return t, nil
+		}
+	}
+	// 数值基元 + 数组/Copyd 后缀
+	switch base {
+	case "int", "long", "char":
+		if suffix == "[]" {
+			return mkList(tIntV), nil
+		}
+		if suffix == "Copyd" {
+			return &Type{Kind: tCopyd, Elem: mkList(tIntV)}, nil // int[Copyd] = Copyd<Array<int>>
+		}
+		return tIntV, nil
+	case "float", "double":
+		if suffix == "[]" {
+			return mkList(tFloatV), nil
+		}
+		if suffix == "Copyd" {
+			return &Type{Kind: tCopyd, Elem: mkList(tFloatV)}, nil
+		}
+		return tFloatV, nil
+	case "String":
+		return tStringV, nil
+	case "bool":
+		return tBoolV, nil
+	case "void":
+		return tNilV, nil
+	case "FuncBuffer":
+		return tFuncBufferV, nil
+	case "IOStream":
+		return tIOStreamV, nil
+	case "InputStream":
+		return tInputStreamV, nil
+	case "OutputStream":
+		return tOutputStreamV, nil
+	case "Channel":
+		return tChannelV, nil
+	case "Task":
+		return tTaskV, nil
+	case "memorize":
+		return tMemorizeV, nil
+	case "memory":
+		return tMemoryV, nil
+	case "taskm":
+		return tTaskmV, nil
+	case "func":
+		return mkFunc(""), nil
+	case "List", "Array":
+		e := tAnyV
+		if inner != "" {
+			var err error
+			e, err = c.substType(inner, subst, pos)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return mkList(e), nil
+	case "Copyd":
+		if inner == "" {
+			return &Type{Kind: tCopyd, Elem: tAnyV}, nil
+		}
+		e, err := c.substType(inner, subst, pos)
+		if err != nil {
+			return nil, err
+		}
+		return &Type{Kind: tCopyd, Elem: e}, nil
+	case "HashTable":
+		k, v, err := splitTopComma(inner)
+		if err != nil {
+			return nil, &CheckError{Msg: "CompileError: " + err.Error(), Pos: pos}
+		}
+		kt, err := c.substType(k, subst, pos)
+		if err != nil {
+			return nil, err
+		}
+		vt, err := c.substType(v, subst, pos)
+		if err != nil {
+			return nil, err
+		}
+		return mkTable(kt, vt), nil
+	}
+	// 泛型结构体实例：node / node<T> / node<T, U>
+	if def, ok := c.structs[base]; ok {
+		var args []*Type
+		if inner != "" {
+			for _, a := range splitTopCommas(inner) {
+				at, err := c.substType(a, subst, pos)
+				if err != nil {
+					return nil, err
+				}
+				args = append(args, at)
+			}
+			if len(def.TypeParams) > 0 && len(args) != len(def.TypeParams) {
+				return nil, &CheckError{Msg: fmt.Sprintf("CompileError: %s takes %d type argument(s), got %d", base, len(def.TypeParams), len(args)), Pos: pos}
+			}
+		}
+		return &Type{Kind: tStruct, FName: base, Args: args}, nil
+	}
+	if _, ok := c.interfaces[base]; ok {
 		return tAnyV, nil
 	}
 	return nil, &CheckError{Msg: fmt.Sprintf("CompileError: unknown type %q", s), Pos: pos}
+}
+
+// splitTopCommas 按顶层逗号切分（忽略尖括号内逗号）。
+func splitTopCommas(s string) []string {
+	var parts []string
+	depth, start := 0, 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '<':
+			depth++
+		case '>':
+			depth--
+		case ',':
+			if depth == 0 {
+				parts = append(parts, strings.TrimSpace(s[start:i]))
+				start = i + 1
+			}
+		}
+	}
+	if rest := strings.TrimSpace(s[start:]); rest != "" {
+		parts = append(parts, rest)
+	}
+	return parts
 }
 
 func (c *checker) errf(pos Pos, format string, args ...interface{}) error {
@@ -410,13 +623,13 @@ func (c *checker) errf(pos Pos, format string, args ...interface{}) error {
 }
 
 func (c *checker) paramType(p Param, pos Pos) (*Type, error) {
-	return c.resolveType(p.Type, p.Pos)
+	return c.substType(p.Type, c.curSubst, p.Pos)
 }
 
 func (c *checker) checkFunc(f *Func) error {
 	var retType *Type
 	if f.Ret != "" {
-		t, err := c.resolveType(f.Ret, f.Pos)
+		t, err := c.substType(f.Ret, c.curSubst, f.Pos)
 		if err != nil {
 			return err
 		}
@@ -503,7 +716,7 @@ func (c *checker) checkStmt(st Stmt, sc *cScope) error {
 		}
 		return c.checkBlock(s.Body, inner)
 	case *DeclStmt:
-		typ, err := c.resolveType(s.Type, s.Pos)
+		typ, err := c.substType(s.Type, c.curSubst, s.Pos)
 		if err != nil {
 			return err
 		}
@@ -517,8 +730,8 @@ func (c *checker) checkStmt(st Stmt, sc *cScope) error {
 				return c.errf(s.Pos, "TypeError: cannot assign %s to %s", it, typ)
 			}
 			v.init = true
-		} else if typ.Kind == tStruct {
-			v.init = true // 结构体零值实例可用
+		} else if typ.Kind == tStruct || typ.Kind == tPtr {
+			v.init = true // 结构体零值实例 / 指针零值（null）可用
 		}
 		return sc.declare(s.Name, v, s.Pos)
 	case *AssignStmt:
@@ -553,7 +766,7 @@ func (c *checker) checkStmt(st Stmt, sc *cScope) error {
 			if !ok {
 				return c.errf(target.Pos, "TypeError: no member %q on %s", target.Name, objT.FName)
 			}
-			ft, err := c.resolveType(fieldT, target.Pos)
+			ft, err := c.substType(fieldT, c.instanceSubst(def, objT), target.Pos)
 			if err != nil {
 				return err
 			}
@@ -588,6 +801,8 @@ func posOf(e Expr) Pos {
 	case *StrLit:
 		return x.Pos
 	case *BoolLit:
+		return x.Pos
+	case *NullLit:
 		return x.Pos
 	case *Ident:
 		return x.Pos
@@ -637,6 +852,8 @@ func (c *checker) infer(e Expr, sc *cScope) (*Type, error) {
 		return tStringV, nil
 	case *BoolLit:
 		return tBoolV, nil
+	case *NullLit:
+		return &Type{Kind: tNull}, nil
 	case *Ident:
 		if x.Name == "true" || x.Name == "false" {
 			return tBoolV, nil
@@ -771,8 +988,11 @@ func (c *checker) inferBin(x *BinOp, sc *cScope) (*Type, error) {
 		}
 		return tIntV, nil
 	case "==", "!=":
-		if !(isNumeric(l) && isNumeric(r)) && !(l.Kind == tString && r.Kind == tString) &&
-			!(l.Kind == tBool && r.Kind == tBool) && !(l.Kind == tAny || r.Kind == tAny) {
+		ok := (isNumeric(l) && isNumeric(r)) || (l.Kind == tString && r.Kind == tString) ||
+			(l.Kind == tBool && r.Kind == tBool) || (l.Kind == tAny || r.Kind == tAny) ||
+			(l.Kind == tNull || r.Kind == tNull) || (l.Kind == tPtr || r.Kind == tPtr) ||
+			(l.Kind == tStruct && r.Kind == tStruct) || (l.Kind == tCopyd || r.Kind == tCopyd)
+		if !ok {
 			return nil, c.errf(x.Pos, "TypeError: cannot compare %s and %s", l, r)
 		}
 		return tBoolV, nil
@@ -802,11 +1022,33 @@ func (c *checker) memberType(recv *Type, name string, pos Pos) (*Type, error) {
 	case tStruct:
 		if def, ok := c.structs[recv.FName]; ok {
 			if typ, exists := def.Types[name]; exists {
-				return c.resolveType(typ, pos)
+				subst := c.instanceSubst(def, recv)
+				return c.substType(typ, subst, pos)
 			}
 		}
+	case tPtr:
+		// 指针成员访问自动解引用
+		return c.memberType(recv.Elem, name, pos)
+	case tCopyd:
+		return c.memberType(recv.Elem, name, pos)
 	}
 	return nil, c.errf(pos, "TypeError: no member %q on %s", name, recv)
+}
+
+// instanceSubst 构造实例的类型参数替换表（泛型方法体内的 curSubst 优先）。
+func (c *checker) instanceSubst(def *StructDef, recv *Type) map[string]*Type {
+	subst := map[string]*Type{}
+	for i, tp := range def.TypeParams {
+		if i < len(recv.Args) {
+			subst[tp] = recv.Args[i]
+		} else {
+			subst[tp] = tAnyV
+		}
+	}
+	for k, v := range c.curSubst {
+		subst[k] = v
+	}
+	return subst
 }
 
 func (c *checker) checkArity(name string, want, got int, pos Pos) error {
@@ -1023,6 +1265,11 @@ func (c *checker) methodType(recv *Type, name string, args []*Type, pos Pos) (*T
 		if !ok {
 			return nil, c.errf(pos, "TypeError: type %s has no impl", recv.FName)
 		}
+		if sd, ok := c.structs[recv.FName]; ok {
+			prev := c.curSubst
+			c.curSubst = c.instanceSubst(sd, recv)
+			defer func() { c.curSubst = prev }()
+		}
 		if fn, ok := def.SelfMethods[name]; ok {
 			if len(fn.Params)-1 != len(args) {
 				return nil, c.errf(pos, "CompileError: %s() expects %d args, got %d", name, len(fn.Params)-1, len(args))
@@ -1037,13 +1284,24 @@ func (c *checker) methodType(recv *Type, name string, args []*Type, pos Pos) (*T
 				}
 			}
 			if fn.Ret != "" {
-				return c.resolveType(fn.Ret, pos)
+				return c.substType(fn.Ret, c.curSubst, pos)
 			}
 			return tFuncBufferV, nil
 		}
 		if _, ok := def.Methods[name]; ok {
 			return nil, c.errf(pos, "TypeError: %s is a static method; call it via %s::%s(...)", name, recv.FName, name)
 		}
+	case tPtr:
+		// 指针方法调用自动解引用
+		return c.methodType(recv.Elem, name, args, pos)
+	case tCopyd:
+		if name == "ptr" {
+			if err := c.checkArity(name, 0, len(args), pos); err != nil {
+				return nil, err
+			}
+			return recv.Elem, nil // .ptr() 取出 Copyd 包装的地址
+		}
+		return c.methodType(recv.Elem, name, args, pos)
 	}
 	return nil, c.errf(pos, "TypeError: no method %q on %s", name, recv)
 }
@@ -1267,6 +1525,14 @@ func (c *checker) inferScope(x *ScopeCall, sc *cScope) (*Type, error) {
 		return nil, c.errf(x.Pos, "TypeError: GlobalMemory has no static method %q", x.Name)
 	}
 	if def, ok := c.impls[x.Scope]; ok {
+		// 泛型静态方法：类型参数按 interface{} 宽松替换
+		prev := c.curSubst
+		subst := map[string]*Type{}
+		for _, tp := range def.TypeParams {
+			subst[tp] = tAnyV
+		}
+		c.curSubst = subst
+		defer func() { c.curSubst = prev }()
 		fn, ok := def.Methods[x.Name]
 		if !ok {
 			return nil, c.errf(x.Pos, "TypeError: %s has no static method %q", x.Scope, x.Name)
@@ -1284,7 +1550,7 @@ func (c *checker) inferScope(x *ScopeCall, sc *cScope) (*Type, error) {
 			}
 		}
 		if fn.Ret != "" {
-			return c.resolveType(fn.Ret, x.Pos)
+			return c.substType(fn.Ret, c.curSubst, x.Pos)
 		}
 		return tFuncBufferV, nil
 	}

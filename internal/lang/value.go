@@ -52,10 +52,13 @@ func (NilV) String() string   { return "nil" }
 // ---- rolling List<T> (spec §4) ----
 
 // List is a rolling two-pointer buffer: visible elements live in [head, tail).
+// mem/blockID 挂接全局内存管理器（写入时标记所属 block 为脏）。
 type List struct {
-	items []Value
-	head  int
-	tail  int
+	items   []Value
+	head    int
+	tail    int
+	mem     *MemoryManager
+	blockID int
 }
 
 func NewList(items ...Value) *List {
@@ -106,6 +109,9 @@ func (l *List) Reset() { l.head = 0 }
 func (l *List) Append(v Value) {
 	l.items = append(l.items, v)
 	l.tail++
+	if l.mem != nil {
+		l.mem.MarkDirty(l.blockID)
+	}
 }
 
 // AppendAll copies every visible element of o onto the tail (o is not consumed).
@@ -313,8 +319,10 @@ func (f *FuncValue) String() string   { return "<func " + f.fn.Name + ">" }
 // FuncBuffer of the coroutine (spec §14).
 type Task struct {
 	*FuncBuffer
-	doneCh chan struct{}
-	err    error
+	doneCh  chan struct{}
+	err     error
+	Pid     int
+	BlockID int
 }
 
 func (t *Task) TypeName() string { return "Task" }
@@ -335,6 +343,12 @@ func (s *StructValue) String() string {
 	}
 	return "<" + s.SType + " {" + strings.Join(parts, ", ") + "}>"
 }
+
+// CopydValue 包装 Copyd<T> 参数值；.ptr() 取出包装的地址。
+type CopydValue struct{ V Value }
+
+func (c *CopydValue) TypeName() string { return "Copyd" }
+func (c *CopydValue) String() string   { return c.V.String() } // Copyd 透明
 
 // Channel is the coroutine communication primitive (block-buffered).
 type Channel struct{ ch chan Value }

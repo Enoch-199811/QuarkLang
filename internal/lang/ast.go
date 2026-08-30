@@ -39,11 +39,12 @@ type Member struct {
 	Pos  Pos
 }
 
-// StructDecl is a struct declaration: "struct { ... } Name;".
+// StructDecl is a struct declaration: "struct<T> { ... } Name;".
 type StructDecl struct {
-	Name    string
-	Members []Member
-	Pos     Pos
+	Name       string
+	TypeParams []string
+	Members    []Member
+	Pos        Pos
 }
 
 // MethodSig is an interface method signature (no body).
@@ -61,12 +62,14 @@ type InterfaceDecl struct {
 	Pos     Pos
 }
 
-// ImplDecl is an impl declaration: "impl [Iface] { funcs } Type;".
+// ImplDecl is an impl declaration: "impl<T> [Iface] { funcs } Type;".
+// 规则：struct 有泛型参数时，impl 必须引入同样的参数。
 type ImplDecl struct {
-	Iface   string
-	Type    string
-	Methods []*FuncDecl
-	Pos     Pos
+	Iface      string
+	Type       string
+	TypeParams []string
+	Methods    []*FuncDecl
+	Pos        Pos
 }
 
 // Block is a brace-delimited statement list.
@@ -147,6 +150,7 @@ type BoolLit struct {
 	V   bool
 	Pos Pos
 }
+type NullLit struct{ Pos Pos }
 type Ident struct {
 	Name string
 	Pos  Pos
@@ -195,6 +199,7 @@ func (*IntLit) isExpr()     {}
 func (*FloatLit) isExpr()   {}
 func (*StrLit) isExpr()     {}
 func (*BoolLit) isExpr()    {}
+func (*NullLit) isExpr()    {}
 func (*Ident) isExpr()      {}
 func (*ListLit) isExpr()    {}
 func (*BinOp) isExpr()      {}

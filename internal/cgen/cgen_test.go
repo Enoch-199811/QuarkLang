@@ -157,3 +157,49 @@ func TestStringEscapes(t *testing.T) {
 		t.Fatalf("got %q, IR:\n%s", out, ir)
 	}
 }
+
+// 变量 + if/else + while + 比较 + 布尔（lli 全链路）
+func TestVariablesAndControlFlow(t *testing.T) {
+	lli, err := exec.LookPath("lli")
+	if err != nil {
+		t.Skip("lli not available")
+	}
+	src := "func main(io IOStream) {\n" +
+		"    x int = 5;\n" +
+		"    y int = x * 2 + 1;\n" +
+		"    io.println(y);\n" +
+		"    if (y > 10) {\n" +
+		"        io.println(\"big\");\n" +
+		"    } else {\n" +
+		"        io.println(\"small\");\n" +
+		"    }\n" +
+		"    n int = 0;\n" +
+		"    i int = 1;\n" +
+		"    while (i <= 5) {\n" +
+		"        n = n + i;\n" +
+		"        i = i + 1;\n" +
+		"    }\n" +
+		"    io.println(n);\n" +
+		"    io.println(3 == 3, 3 != 4, 2 < 1);\n" +
+		"    io.println(true && false, true || false, !true);\n" +
+		"    s String = \"hi\";\n" +
+		"    io.println(s);\n" +
+		"}\n"
+	ir, err := Transpile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, _ := os.CreateTemp("", "quark-cf-*.ll")
+	f.WriteString(ir)
+	name := f.Name()
+	f.Close()
+	defer os.Remove(name)
+	out, err := exec.Command(lli, name).CombinedOutput()
+	if err != nil {
+		t.Fatalf("lli: %v\nIR:\n%s", err, ir)
+	}
+	want := "11\nbig\n15\ntrue true false\nfalse true false\nhi\n"
+	if string(out) != want {
+		t.Fatalf("got %q want %q\nIR:\n%s", out, want, ir)
+	}
+}

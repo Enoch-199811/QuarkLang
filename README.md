@@ -13,7 +13,10 @@ go test ./...
 ## 支持子集（随迭代扩大）
 
 - `func main(io IOStream) { ... }`
-- `io.println(expr, ...)`（int / String 字面量、`+ - * /` 算术、括号）
+- 变量：`x int = expr;` / `s String = "...";` 与赋值 `x = expr;`（alloca/store/load）
+- 控制流：`if (cond) {...} else {...}`、`while (cond) {...}`（基本块 + br）
+- 表达式：算术 `+ - * / %`、比较 `== != < <= > >=`（icmp）、`&& || !`、布尔字面量（select true/false 输出）
+- `io.println(expr, ...)`（格式串按编译后实际类型生成）
 - 其它语法暂报明确的「compiler v0.2 supports only ...」错误
 
 ## 布局

@@ -599,11 +599,11 @@ func main(io IOStream) {
 
 // program library; 编译为库，运行时报错
 func TestProgramLibraryNotRunnable(t *testing.T) {
-	_, err := runSrc(t, `program library;
-
-func main(io IOStream) {
+	_, err := runSrc(t, `func main(io IOStream) {
     io.println("never");
-}`)
+}
+
+program library;`)
 	if err == nil || !strings.Contains(err.Error(), "cannot run a library") {
 		t.Fatalf("got %v", err)
 	}
@@ -611,11 +611,11 @@ func main(io IOStream) {
 
 // program main; 正常运行
 func TestProgramMain(t *testing.T) {
-	out, err := runSrc(t, `program main;
-
-func main(io IOStream) {
+	out, err := runSrc(t, `func main(io IOStream) {
     io.println("ok");
-}`)
+}
+
+program main;`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -660,6 +660,42 @@ func main(io IOStream) {
     io.println(1);
 }`)
 	if err == nil || !strings.Contains(err.Error(), "不能再嵌套大括号") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// delete variable; —— 回收内存于 __delete__()，block 消除日志
+func TestDeleteReclaimsBlock(t *testing.T) {
+	prog, err := Compile(`func main(io IOStream) {
+    l List<int> = [1, 2, 3];
+    io.println(l.size());
+    delete l;
+    GlobalMemory::compact();
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	in, err := runWithInterp(prog, "test.qk", nil, strings.NewReader(""), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := in.mem.BlockCount(); n != 0 {
+		t.Fatalf("expected 0 blocks after delete+compact, got %d", n)
+	}
+	if len(in.mem.deletions) == 0 {
+		t.Fatal("expected deletion log entries")
+	}
+}
+
+// program 预制宏必须写在程序末尾（节点接入先后顺序）
+func TestProgramMustBeLast(t *testing.T) {
+	_, err := Compile(`program main;
+
+func main(io IOStream) {
+    io.println(1);
+}`)
+	if err == nil || !strings.Contains(err.Error(), "program 预制宏必须写在程序末尾") {
 		t.Fatalf("got %v", err)
 	}
 }

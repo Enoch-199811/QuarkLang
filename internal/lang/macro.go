@@ -191,7 +191,7 @@ func expandBody(body []Token, caps map[string][]Token, mode string) ([]Token, er
 				return nil, err
 			}
 			i = ni
-			if args[0].Text == mode {
+			if args[0].Text == mode || (mode == "explain" && args[0].Text == "run") {
 				sub, err := expandBody(blk, caps, mode)
 				if err != nil {
 					return nil, err
@@ -199,18 +199,24 @@ func expandBody(body []Token, caps map[string][]Token, mode string) ([]Token, er
 				out = append(out, sub...)
 			}
 		case "insert":
-			inner, err := parseAstArg(args)
-			if err != nil {
-				return nil, err
+			var inner string
+			var err error
+			if len(args) == 1 && args[0].Kind == TIdent {
+				inner = args[0].Text // #insert name 形式
+			} else {
+				inner, err = parseAstArg(args)
+				if err != nil {
+					return nil, err
+				}
 			}
 			captured, ok := caps[inner]
 			if !ok {
 				return nil, fmt.Errorf("第 %d 行：#insert(#ast(%s))：%s 不是模式捕获名", t.Line, inner, inner)
 			}
 			out = append(out, captured...)
-		case "execute":
+		case "execute", "exec":
 			if len(args) < 1 || args[0].Kind != TIdent {
-				return nil, fmt.Errorf("第 %d 行：#execute 需要 (名字)", t.Line)
+				return nil, fmt.Errorf("第 %d 行：#%s 需要 (名字)", t.Line, cmd)
 			}
 			out = append(out, Token{Kind: TIdent, Text: args[0].Text, Line: t.Line, Col: t.Col})
 		case "error":

@@ -40,7 +40,7 @@ func Compile(src string) (*Program, error) {
 		return nil, err
 	}
 	if len(macros) > 0 {
-		rest, err = ExpandMacros(rest, macros, "run")
+		rest, err = ExpandMacros(rest, macros, "explain") // 解释器 = explain 操作时（xmind §操作时）
 		if err != nil {
 			return nil, err
 		}
@@ -497,6 +497,22 @@ func (p *parser) parseInterface() (*InterfaceDecl, error) {
 	for !p.curIs(TRBrace) {
 		if p.curIs(TEOF) {
 			return nil, p.errf(p.cur(), "unterminated interface body (missing '}')")
+		}
+		// expand interface Name; 组合接口行（xmind §接口）
+		if p.curIs(TIdent) && p.cur().Text == "expand" {
+			p.advance()
+			if _, err := p.expect(TInterface, "'interface'"); err != nil {
+				return nil, err
+			}
+			n, err := p.expectIdent("expanded interface name")
+			if err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(TSemi, "';'"); err != nil {
+				return nil, err
+			}
+			id.Expands = append(id.Expands, n.Text)
+			continue
 		}
 		sig, err := p.parseMethodSig()
 		if err != nil {

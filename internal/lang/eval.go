@@ -136,6 +136,13 @@ func (m *MemoryManager) BlockCount() int {
 	return len(m.blocks)
 }
 
+// Clear 直接清理整个内存（xmind：globalMemory.clear() 按修改日志记录直接清理）。
+func (m *MemoryManager) Clear() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.blocks = map[int]*MemBlock{}
+}
+
 // StructDef is a registered struct declaration.
 type StructDef struct {
 	Name       string
@@ -342,6 +349,8 @@ func (in *interp) execute(ctx *execCtx) error {
 	ctx.executed = true
 
 	sc := newScope(nil)
+	// 预声明常量（xmind §内存）：DynamicStackAndHeap 实验模式标志
+	_ = sc.declare("DynamicStackAndHeap", StrV("DynamicStackAndHeap"), ctx.Fn.Pos)
 	fn := ctx.Fn
 	for i, p := range fn.Params {
 		v := ctx.Args[i]
@@ -1040,6 +1049,18 @@ func (in *interp) callMethod(obj Value, name string, args []Value, ctx *execCtx,
 		}
 	case *Memory:
 		switch name {
+		case "clear":
+			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
+				return nil, err
+			}
+			in.mem.Clear() // globalMemory.clear()：按修改日志直接清理
+			return NilV{}, nil
+		case "mode":
+			// 实验性：GlobalMemory.mode(DynamicStackAndHeap) 将栈和堆动态分配
+			if err := wantArity(name, 1, len(args), pos, ctx); err != nil {
+				return nil, err
+			}
+			return NilV{}, nil
 		case "compact":
 			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
 				return nil, err
@@ -1219,6 +1240,17 @@ func (in *interp) evalScopeCall(x *ScopeCall, sc *scope, ctx *execCtx) (Value, e
 		return nil, &RunError{Msg: fmt.Sprintf("TypeError: List has no static method %q", x.Name), Pos: x.Pos, Ctx: ctx}
 	case "GlobalMemory":
 		switch x.Name {
+		case "clear":
+			if len(args) != 0 {
+				return nil, wantArity("GlobalMemory::clear", 0, len(args), x.Pos, ctx)
+			}
+			in.mem.Clear()
+			return NilV{}, nil
+		case "mode":
+			if len(args) != 1 {
+				return nil, wantArity("GlobalMemory::mode", 1, len(args), x.Pos, ctx)
+			}
+			return NilV{}, nil // 实验性标志，v1 占位
 		case "compact":
 			if len(args) != 0 {
 				return nil, wantArity("GlobalMemory::compact", 0, len(args), x.Pos, ctx)

@@ -1241,37 +1241,48 @@ func (c *checker) methodType(recv *Type, name string, args []*Type, pos Pos) (*T
 	case tTaskm:
 		switch name {
 		case "spawn":
-			if len(args) < 1 {
-				return nil, c.errf(pos, "CompileError: taskm.spawn requires a function reference as first arg")
+			// v2：taskm.spawn() 无参，创建线程返回 pid
+			if len(args) != 0 {
+				return nil, c.errf(pos, "CompileError: taskm.spawn() takes no args, got %d", len(args))
 			}
-			if args[0].Kind != tFunc {
-				return nil, c.errf(pos, "TypeError: taskm.spawn requires a function reference, got %s", args[0])
+			return tIntV, nil
+		case "merge":
+			// v2：taskm.merge(pid, fn, args...)
+			if len(args) < 2 {
+				return nil, c.errf(pos, "CompileError: taskm.merge(pid, fn, args...) requires at least 2 args, got %d", len(args))
 			}
-			if args[0].FName != "" {
-				if fn, ok := c.fns[args[0].FName]; ok {
-					if len(fn.Params) != len(args)-1 {
-						return nil, c.errf(pos, "CompileError: %s expects %d args, got %d", fn.Name, len(fn.Params), len(args)-1)
+			if args[0].Kind != tInt {
+				return nil, c.errf(pos, "TypeError: taskm.merge first arg must be a pid (int), got %s", args[0])
+			}
+			if args[1].Kind != tFunc {
+				return nil, c.errf(pos, "TypeError: taskm.merge second arg must be a function reference, got %s", args[1])
+			}
+			if args[1].FName != "" {
+				if fn, ok := c.fns[args[1].FName]; ok {
+					if len(fn.Params) != len(args)-2 {
+						return nil, c.errf(pos, "CompileError: %s expects %d args, got %d", fn.Name, len(fn.Params), len(args)-2)
 					}
 					for i, p := range fn.Params {
 						pt, err := c.paramType(p, pos)
 						if err != nil {
 							return nil, err
 						}
-						if !assignable(args[i+1], pt) {
-							return nil, c.errf(pos, "TypeError: argument %d of %s: cannot assign %s to %s", i+1, fn.Name, args[i+1], pt)
+						if !assignable(args[i+2], pt) {
+							return nil, c.errf(pos, "TypeError: argument %d of %s: cannot assign %s to %s", i+1, fn.Name, args[i+2], pt)
 						}
 					}
 				}
 			}
-			return tIntV, nil // spawn() 返回 pid
-		case "block", "merge":
-			if err := c.checkArity("taskm."+name, 1, len(args), pos); err != nil {
+			return tNilV, nil
+		case "block":
+			// v2：taskm.block(pid) 返回 void
+			if err := c.checkArity("taskm.block", 1, len(args), pos); err != nil {
 				return nil, err
 			}
 			if args[0].Kind != tTask && args[0].Kind != tInt {
-				return nil, c.errf(pos, "TypeError: taskm.%s requires a Task or pid, got %s", name, args[0])
+				return nil, c.errf(pos, "TypeError: taskm.block requires a pid, got %s", args[0])
 			}
-			return tFuncBufferV, nil
+			return tNilV, nil
 		case "done":
 			if err := c.checkArity("taskm.done", 1, len(args), pos); err != nil {
 				return nil, err
@@ -1347,51 +1358,19 @@ func (c *checker) inferCall(x *CallExpr, sc *cScope) (*Type, error) {
 		if !ok {
 			return nil, c.errf(id.Pos, "CompileError: undeclared function %q", id.Name)
 		}
-		if want, ok := c.sigs[x.Sign.Name]; ok {
-			if len(x.Sign.Args) != want {
-				return nil, c.errf(x.Pos, "CompileError: signature %q takes %d <Prefix> argument(s), got %d", x.Sign.Name, want, len(x.Sign.Args))
-			}
-			if x.Sign.Name == "memorize" && len(x.Sign.Args) == 1 {
-				pt, err := c.infer(x.Sign.Args[0], sc)
-				if err != nil {
-					return nil, err
-				}
-				if pt.Kind != tMemorize {
-					return nil, c.errf(x.Pos, "TypeError: @memorize prefix must be a memorize buffer, got %s", pt)
-				}
-			}
-		} else {
-			// 用户类型实现 Sign：签名名 = 类型名，必须有静态 call(prefix, fb)
-			def, ok := c.impls[x.Sign.Name]
-			if !ok {
-				return nil, c.errf(x.Pos, "CompileError: %q is not a registered signature (its type does not implement Sign)", x.Sign.Name)
-			}
-			if len(x.Sign.Args) != 1 {
-				return nil, c.errf(x.Pos, "CompileError: signature %q takes 1 <Prefix> argument, got %d", x.Sign.Name, len(x.Sign.Args))
-			}
-			callFn, ok := def.Methods["call"]
-			if !ok || len(callFn.Params) != 2 {
-				return nil, c.errf(x.Pos, "CompileError: type %q does not implement Sign (no static call(prefix, fb))", x.Sign.Name)
-			}
-			pt, err := c.infer(x.Sign.Args[0], sc)
-			if err != nil {
-				return nil, err
-			}
-			wantT, err := c.paramType(callFn.Params[0], x.Pos)
-			if err != nil {
-				return nil, err
-			}
-			if !assignable(pt, wantT) {
-				return nil, c.errf(x.Pos, "TypeError: @%s prefix must be %s, got %s", x.Sign.Name, wantT, pt)
-			}
-		}
+		// v2 签名：@mb(prefix) —— mb 是变量（Sign 实例），结果类型 = 被包装函数返回类型
 		if err := c.checkCallArgs(fn, x.Args, sc, x.Pos); err != nil {
 			return nil, err
 		}
-		if x.Sign.Name == "async" {
-			return tTaskV, nil
+		// mb 必须在作用域中（Sign 实例变量）
+		if v := sc.lookup(x.Sign.Name); v == nil {
+			return nil, c.errf(x.Pos, "CompileError: @%s —— 签名名必须是作用域中的 Sign 实例变量（mb）", x.Sign.Name)
 		}
-		return tFuncBufferV, nil
+		// 结果类型：被包装函数 fn 的返回类型
+		if fn.Ret != "" {
+			return c.substType(fn.Ret, c.curSubst, x.Pos)
+		}
+		return tNilV, nil
 	}
 	// 方法调用
 	if m, ok := x.Fn.(*MemberExpr); ok {

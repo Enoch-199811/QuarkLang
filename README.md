@@ -15,12 +15,25 @@
 - **泛型 / 指针 / Copyd**：`struct<T>` / `impl<T>`（struct 有泛型参数时 impl 必须引入，实例化替换检查）；指针类型 `T&` 与 `null`（自动解引用、NullPointerError）；`Copyd<T>` 运行时包装 + `.ptr()`。
 - **真实内存系统**：block 分配（`memory.setBlock(n)` 调粒度）、写入标脏、协程结束自动标记可回收、`compact()` 实际清理。
 
-## 快速开始
+## 快速开始（Get Started）
+
+### 解释器（仓库根目录，Go 模块 `quarklang`）
 
 ~~~sh
-go build -o quark .
-./quark examples/hello.qk      # Hello World!
-go test ./internal/lang/       # 35 项测试（go test -race 同样可跑）
+go build -o quark .          # 构建 CLI
+./quark examples/hello.qk    # 运行 .qk 程序（Hello World!）
+go test ./internal/lang/     # 47 项测试（go test -race 同样可跑）
+~~~
+
+### 编译器（`compiler/` 目录，独立 Go 模块 `quarklang/compiler`，LLVM 后端）
+
+需要本机 LLVM 工具链（`clang`/`lli`；仅生成 IR 可不需要）。
+
+~~~sh
+cd compiler
+go run . testdata/hello.qk          # 输出 LLVM IR 到 stdout
+go run . -run testdata/hello.qk     # clang 编译为原生二进制并执行
+go test ./...                       # 7 项测试（llvm-as 语法校验 + lli 全链路）
 ~~~
 
 ## 示例
@@ -38,9 +51,10 @@ go test ./internal/lang/       # 35 项测试（go test -race 同样可跑）
 
 ## 布局
 
-- `main.go` —— CLI 入口：`quark <file.qk> [args...]`
+- `main.go` —— 解释器 CLI 入口：`quark <file.qk> [args...]`
 - `internal/lang/` —— lexer / parser / typecheck / eval / runtime
 - `examples/` —— 示例程序
+- `compiler/` —— LLVM 编译器（`qkc` CLI + `internal/cgen` IR 发射器 + 测试）
 
 ## 分支
 
@@ -48,7 +62,7 @@ go test ./internal/lang/       # 35 项测试（go test -race 同样可跑）
 |---|---|
 | `main` | 集成分支（interpreter + examples 的合并结果） |
 | `interpreter` | 解释器实现（lexer/parser/typecheck/eval/runtime） |
-| `compiler` | 跨系统编译器（v0.2：LLVM IR 后端 qkc，`-run` 编译执行） |
+| `compiler` | 编译器（**已并入 main**，位于 `compiler/` 目录；分支保留历史） |
 | `examples` | 示例程序 |
 | `docs` | 语言设计文档（独立维护，**不并入 main**） |
 
@@ -56,7 +70,7 @@ go test ./internal/lang/       # 35 项测试（go test -race 同样可跑）
 
 ## 状态
 
-v0.2 解释器已完成：滚动 List、FuncBuffer、@memorize / @async 签名、用户自定义 struct/impl/interface 与用户自定义 Sign、泛型 struct<T>/impl<T>、指针 T& 与 null、Copyd 运行时包装 + .ptr()、真实内存系统（block/脏标记/协程回收/compact）、out 多返回值、main(io/env/args)、IO 重定向与执行表、协程系统、编译期静态类型检查（41 项测试全绿）。compiler 分支提供 v0.2 **LLVM IR 后端**（qkc，`-run` 编译执行）。待实现见 docs 分支 spec §15。
+v0.2：解释器（滚动 List、FuncBuffer、@memorize/@async 签名、struct/impl/interface、泛型/指针/Copyd、真实内存系统、协程、静态类型检查，**47 项测试全绿**）；编译器（`compiler/`，**LLVM 后端**：变量/控制流/算术/比较/布尔，`-run` 一键编译执行，**7 项测试全绿**）。待实现见 docs 分支 spec §15。
 
 ## 许可证
 

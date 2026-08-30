@@ -178,6 +178,7 @@ type ListLit struct {
 }
 type StructLit struct {
 	Fields []StructLitField
+	Name   string // 目标有名结构体（typecheck 填充），eval 用它建类型
 	Pos    Pos
 }
 type StructLitField struct {

@@ -520,7 +520,11 @@ func (in *interp) evalExpr(e Expr, sc *scope, ctx *execCtx) (Value, error) {
 	case *NullLit:
 		return NilV{}, nil
 	case *StructLit:
-		sv := &StructValue{SType: ".", Fields: map[string]Value{}}
+		st := x.Name
+		if st == "" {
+			st = "."
+		}
+		sv := &StructValue{SType: st, Fields: map[string]Value{}}
 		for _, f := range x.Fields {
 			v, err := in.evalExpr(f.X, sc, ctx)
 			if err != nil {

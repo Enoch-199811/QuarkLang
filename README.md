@@ -48,7 +48,7 @@ go test ./internal/lang/       # 35 项测试（go test -race 同样可跑）
 |---|---|
 | `main` | 集成分支（interpreter + examples 的合并结果） |
 | `interpreter` | 解释器实现（lexer/parser/typecheck/eval/runtime） |
-| `compiler` | 跨系统编译器（v0.2 C 转译器骨架 qkc，hello 子集） |
+| `compiler` | 跨系统编译器（v0.2：LLVM IR 后端 qkc，`-run` 编译执行） |
 | `examples` | 示例程序 |
 | `docs` | 语言设计文档（独立维护，**不并入 main**） |
 
@@ -56,7 +56,7 @@ go test ./internal/lang/       # 35 项测试（go test -race 同样可跑）
 
 ## 状态
 
-v0.2 解释器已完成：滚动 List、FuncBuffer、@memorize / @async 签名、用户自定义 struct/impl/interface 与用户自定义 Sign、泛型 struct<T>/impl<T>、指针 T& 与 null、Copyd 运行时包装 + .ptr()、真实内存系统（block/脏标记/协程回收/compact）、out 多返回值、main(io/env/args)、IO 重定向与执行表、协程系统、编译期静态类型检查（41 项测试全绿）。compiler 分支提供 v0.2 C 转译器骨架。待实现见 docs 分支 spec §15。
+v0.2 解释器已完成：滚动 List、FuncBuffer、@memorize / @async 签名、用户自定义 struct/impl/interface 与用户自定义 Sign、泛型 struct<T>/impl<T>、指针 T& 与 null、Copyd 运行时包装 + .ptr()、真实内存系统（block/脏标记/协程回收/compact）、out 多返回值、main(io/env/args)、IO 重定向与执行表、协程系统、编译期静态类型检查（41 项测试全绿）。compiler 分支提供 v0.2 **LLVM IR 后端**（qkc，`-run` 编译执行）。待实现见 docs 分支 spec §15。
 
 ## 许可证
 

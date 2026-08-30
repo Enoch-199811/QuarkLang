@@ -50,7 +50,7 @@ go test ./internal/lang/       # 35 项测试（go test -race 同样可跑）
 | `examples` | 示例程序 |
 | `docs` | 语言设计文档（独立维护，**不并入 main**） |
 
-语言设计文档见 [docs 分支的 docs/spec.md](https://github.com/Enoch-199811/QuarkLang/blob/docs/docs/spec.md)（权威来源，随设计迭代）。
+语言设计文档见 [docs 分支的 spec.md](https://github.com/Enoch-199811/QuarkLang/blob/docs/spec.md)（权威来源，随设计迭代；本地可直接在 `docs/` 目录编辑提交，它跟随 docs 分支）。
 
 ## 状态
 

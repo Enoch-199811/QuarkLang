@@ -1,6 +1,9 @@
 package lang
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // ParseError reports a syntax error with source position.
 type ParseError struct {
@@ -143,6 +146,65 @@ func (p *parser) parseProgram() (*Program, error) {
 		default:
 			if p.cur().Kind == TIdent {
 				switch p.cur().Text {
+				case "type":
+					// xmind：type interface<T>{...}(Name) / type struct<T>{...}(Name)
+					p.advance()
+					switch p.cur().Kind {
+					case TInterface:
+						id, err := p.parseInterface()
+						if err != nil {
+							return nil, err
+						}
+						prog.Interfaces = append(prog.Interfaces, id)
+					case TStruct:
+						sd, err := p.parseStruct()
+						if err != nil {
+							return nil, err
+						}
+						prog.Structs = append(prog.Structs, sd)
+					default:
+						return nil, p.errf(p.cur(), "type 只能前缀于 interface/struct")
+					}
+					continue
+				case "space":
+					// xmind：space {...} (name) 自我实现空间（匿名实现）
+					p.advance()
+					if _, err := p.expect(TLBrace, "'{'"); err != nil {
+						return nil, err
+					}
+					im := &ImplDecl{Pos: Pos{Line: p.cur().Line, Col: p.cur().Col}}
+					for !p.curIs(TRBrace) {
+						if p.curIs(TEOF) {
+							return nil, p.errf(p.cur(), "unterminated space body")
+						}
+						m, err := p.parseFunc()
+						if err != nil {
+							return nil, err
+						}
+						im.Methods = append(im.Methods, m)
+					}
+					p.advance() // '}'
+					if _, err := p.expect(TLParen, "'('"); err != nil {
+						return nil, err
+					}
+					tt, err := p.parseType()
+					if err != nil {
+						return nil, err
+					}
+					if _, err := p.expect(TRParen, "')'"); err != nil {
+						return nil, err
+					}
+					if _, err := p.expect(TSemi, "';'"); err != nil {
+						return nil, err
+					}
+					im.Type = tt
+					if i := strings.IndexByte(im.Type, '<'); i >= 0 {
+						inner := im.Type[i+1 : len(im.Type)-1]
+						im.Type = im.Type[:i] // 取基名
+						im.TypeParams = splitTopCommas(inner)
+					}
+					prog.Impls = append(prog.Impls, im)
+					continue
 				case "program":
 					// 预制宏：program main; / program library;
 					p.advance()
@@ -364,13 +426,31 @@ func (p *parser) parseStruct() (*StructDecl, error) {
 		})
 	}
 	p.advance() // '}'
-	if p.curIs(TIdent) {
-		sd.Name = p.advance().Text
+	if err := p.parseStructName(sd); err != nil {
+		return nil, err
 	}
 	if _, err := p.expect(TSemi, "';'"); err != nil {
 		return nil, err
 	}
 	return sd, nil
+}
+
+// parseStructName 取结构体名字：xmind 用 } (name); 括号形式，兼容 } name; 旧形式。
+func (p *parser) parseStructName(sd *StructDecl) error {
+	if p.curIs(TLParen) {
+		p.advance()
+		n, err := p.expectIdent("struct name")
+		if err != nil {
+			return err
+		}
+		if _, err := p.expect(TRParen, "')'"); err != nil {
+			return err
+		}
+		sd.Name = n.Text
+	} else if p.curIs(TIdent) {
+		sd.Name = p.advance().Text
+	}
+	return nil
 }
 
 // parseMethodSig parses an interface method signature: "func name(params) Ret;".
@@ -425,7 +505,18 @@ func (p *parser) parseInterface() (*InterfaceDecl, error) {
 		id.Methods = append(id.Methods, sig)
 	}
 	p.advance() // '}'
-	if p.curIs(TIdent) {
+	if p.curIs(TLParen) {
+		// xmind：type interface {...} (name);
+		p.advance()
+		n, err := p.expectIdent("interface name")
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(TRParen, "')'"); err != nil {
+			return nil, err
+		}
+		id.Name = n.Text
+	} else if p.curIs(TIdent) {
 		id.Name = p.advance().Text
 		// 泛型接口参数：Sign<P> —— 平衡跳过
 		if p.curIs(TLt) {

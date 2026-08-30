@@ -759,14 +759,45 @@ func (c *checker) checkStmt(st Stmt, sc *cScope) error {
 		}
 		v := &cVar{typ: typ, init: false, isConst: s.Decor == "const"}
 		if s.Init != nil {
-			it, err := c.infer(s.Init, sc)
-			if err != nil {
-				return err
+			// .{...} 字面量 → 有名结构体：字段匹配并绑定类型名（xmind §结构体字面量）
+			if sl, ok := s.Init.(*StructLit); ok && typ.Kind == tStruct && typ.FName != "." {
+				def, has := c.structs[typ.FName]
+				if !has {
+					return c.errf(s.Pos, "CompileError: unknown struct %q", typ.FName)
+				}
+				if len(sl.Fields) != len(def.Types) {
+					return c.errf(s.Pos, "TypeError: %s 需要 %d 个字段，字面量给了 %d", typ.FName, len(def.Types), len(sl.Fields))
+				}
+				for _, f := range sl.Fields {
+					ft, has := def.Types[f.Name]
+					if !has {
+						return c.errf(s.Pos, "TypeError: %s 没有字段 %q", typ.FName, f.Name)
+					}
+					fv, err := c.infer(f.X, sc)
+					if err != nil {
+						return err
+					}
+					subst := c.instanceSubst(def, typ)
+					want, err := c.substType(ft, subst, s.Pos)
+					if err != nil {
+						return err
+					}
+					if !assignable(fv, want) {
+						return c.errf(s.Pos, "TypeError: 字段 %q: cannot assign %s to %s", f.Name, fv, want)
+					}
+				}
+				sl.Name = typ.FName
+				v.init = true
+			} else {
+				it, err := c.infer(s.Init, sc)
+				if err != nil {
+					return err
+				}
+				if !assignable(it, typ) {
+					return c.errf(s.Pos, "TypeError: cannot assign %s to %s", it, typ)
+				}
+				v.init = true
 			}
-			if !assignable(it, typ) {
-				return c.errf(s.Pos, "TypeError: cannot assign %s to %s", it, typ)
-			}
-			v.init = true
 		} else if typ.Kind == tStruct || typ.Kind == tPtr {
 			v.init = true // 结构体零值实例 / 指针零值（null）可用
 		}

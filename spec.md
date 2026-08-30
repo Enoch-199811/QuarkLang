@@ -30,9 +30,9 @@
 ~~~text
 program       := { topLevel }
 topLevel      := structDecl | implDecl | interfaceDecl | funcDecl | constDecl
-structDecl    := "struct" "{" { memberDecl } "}" [ident] ";"
+structDecl    := "struct" ["<" identList ">"] "{" { memberDecl } "}" [ident] ";"
 memberDecl    := ident typeName ";"          // 成员格式固定：成员名 成员类型;
-implDecl      := "impl" [interfaceName] "{" { funcDecl } "}" typeName ";"
+implDecl      := "impl" ["<" identList ">"] [interfaceName] "{" { funcDecl } "}" typeName ";"
 interfaceDecl := "interface" "{" { methodSig } "}" [ident] ";"
 funcDecl      := "func" ident "(" [params] ")" block
 block         := "{" { stmt } "}"
@@ -88,6 +88,12 @@ unary         := "*" expr | "-" expr | "!" expr
 - `Copyd<T>` 标记：该值每次传递（赋值、传参、返回）都会被复制一份。
 - `<type>[Copyd]` 是 `Copyd<Array<type>>` 的简便写法。
 - `Copyd<T>` 提供 **`.ptr()` 方法**：取出 Copyd 对象包装的地址（默认传址下，只有 Copyd<> 因传递时自动复制，才需要这个显式取地址的出口）。
+- 运行时：Copyd 参数绑定为 **CopydValue 包装**（深拷贝），方法调用/成员访问自动透传（透明），`.ptr()` 显式取出包装值。
+
+### 3.8 指针类型 `T&` 与 null
+- `T&` 是**指针（可空引用）**类型：如 `node<T>& next`（链表节点）。
+- 零值为 **`null`**（字面量）；值类型可隐式赋给对应指针；指针的成员/方法访问**自动解引用**；对 null 解引用或经 null 赋值 → `NullPointerError`。
+- `null` 只可与指针比较（`==` / `!=`）。
 
 ### 3.6 HashTable<K, V>
 键值表，键、值类型参数化（如 `HashTable<List<interface{}>, List<interface{}>>`）。内置 `contains/get/put/remove/size`。
@@ -259,6 +265,12 @@ impl Sign {
   - 无 self → 只能 `::` 调用（如 `new()`）。
   - 有 self → 用 `.` 调用（如 `io.println(...)`）。
 - `impl { ... } <类型>;` 是无接口的自实现：仅添加方法，不声明实现任何接口（因此不能当作 Sign 使用——自然不支持签名）。
+
+### 7.4 泛型（struct<T> / impl<T>）
+- `struct<T> { T val; node<T>& next; } node;` —— struct 可声明类型参数，成员类型可引用参数。
+- `impl<T> { ... } node;` —— **struct 有泛型参数时，impl 必须引入同样的参数**（反之亦不允许）；方法参数/返回值/体内声明都可引用 T。
+- 实例化：`n node<int>;` —— 声明处给出类型实参；成员与方法的类型按实参替换检查（如 `a.next.val` 为 int）。
+- 静态方法返回泛型实例（如 `func new() node<T>`）在无实例上下文时按 `interface{}` 宽松检查；赋值到具体实例（`a node<int> = node::new()`）时以 any 为通配。
 
 ### 7.3 interface
 
@@ -460,7 +472,7 @@ func main(io IOStream) {
 - **io**：协程直接传递 io；IOStream 内置**执行表**：按到达时间**先进先出**，**优先级读高于写**（v0.1 以读写锁近似）。
 - **回收**：协程结束自动标记其 block 可回收；`GlobalMemory.compact()` 手动清理。
 
-解释器状态（v0.1）：内存由宿主 Go GC 管理（`compact()` 无返回值、为兼容性入口，`memory.setBlock(n)` 存字段）；协程以 Go goroutine 实现——`taskm.spawn→pid / block / merge / done(pid) / channel([n] 默认 1024)`、`@async()`、Task（done + 完整 FuncBuffer）、IOStream 执行表（读写锁：FIFO、读优先）、调度事件自动日志（spawn 带 pid / done）已落地；无 yield 语法；block 级脏标记与真实回收待内存系统轮。
+解释器状态（v0.2 真实内存系统）：block 分配（大小取 `memory.setBlock(n)`，默认 4096）、写入标脏（List 追加触发）、**协程结束自动标记其 block 可回收**、`compact()` 实际清理无人占用的 block（对象本身仍由宿主 Go GC 兜底）。协程以 Go goroutine 实现——`taskm.spawn→pid / block / merge / done(pid) / channel([n] 默认 1024)`、`@async()`、Task（done + 完整 FuncBuffer）、IOStream 执行表（读写锁：FIFO、读优先）、调度事件自动日志（spawn 带 pid / done）已落地；无 yield 语法；block 级脏标记与真实回收待内存系统轮。
 
 ## 15. 实现路线（Go 解释器）
 
@@ -479,5 +491,6 @@ func main(io IOStream) {
 - ✅ 2026-08-29：log 仅手动写入（`log expr;` / `fb.log.append(...)`）；int 32 位环绕 + 越界字面量编译错误；`List.reset()`（head→0）。
 - ⏳ 待实现：Copyd<T> 运行时包装与 `.ptr()`；block 级脏标记与真实内存回收（§14 内存系统轮）。
 - ✅ 2026-08-30 协程系统修订：taskm 为**全局变量**（`taskm.spawn(...)`→pid、`taskm.block(pid)`/`taskm.merge(pid)`→FuncBuffer、`taskm.done(pid)`→bool、`taskm.channel([n])` 默认容量 1024）；**删除 yield 语法**；IOStream 执行表改为 FIFO + 读优先（读写锁）；`compact()` 无返回值、`memory.setBlock(n)`/`GlobalMemory::setBlock(n)` 动态调整 block 粒度；自动日志（spawn 带 pid / done）。
+- ✅ 2026-08-30 泛型/指针/Copyd/真实内存系统：`struct<T>`/`impl<T>`（struct 有参数时 impl 必须引入；实例化替换检查）、指针类型 `T&` 与 `null`（自动解引用、NullPointerError）、CopydValue 运行时包装 + `.ptr()`、block 分配/脏标记/协程回收/`compact()` 实际清理（41 项测试全绿）。
 - ✅ 2026-08-29 编译期静态类型检查 pass：类型推断 + §11.1 检查前置到编译期（未声明标识符/成员、类型不匹配、签名注册与 Prefix 类型、调用实参个数与类型、使用前未初始化、非 List 施加 `*`/next 等、main 参数个数），错误一律带行号；Array/Copyd 静态归一化为 List（复制语义由运行时按注解处理）。
 - ✅ 2026-08-29 用户自定义 struct/impl/interface：结构体（成员、零值实例、字段读写）、interface（方法签名 + 泛型参数）、impl（self 实例方法用 `.` 调用、无 self 静态方法用 `::` 调用）、`impl Sign` 接口一致性检查（缺 call/参数个数不符 → 编译错误）、带返回类型注解的函数（`func f(...) T` 直接返回 `return` 的值，无注解则返回 FuncBuffer）、用户类型实现 Sign 可作为自定义签名（`f(args) @LocalMemorize(mb)`，spec §6.3 参考实现可作为用户代码运行）。

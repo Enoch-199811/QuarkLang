@@ -32,6 +32,7 @@ const (
 	tPtr
 	tCopyd
 	tNull
+	tTypeVar
 )
 
 type Type struct {
@@ -72,7 +73,7 @@ var kindName = map[tKind]string{
 	tNil: "nil", tAny: "interface{}", tFuncBuffer: "FuncBuffer",
 	tIOStream: "IOStream", tInputStream: "InputStream", tOutputStream: "OutputStream",
 	tChannel: "Channel", tTask: "Task", tMemorize: "memorize", tMemory: "memory",
-	tFunc: "func", tStruct: "struct", tTaskm: "taskm", tPtr: "ptr", tCopyd: "Copyd", tNull: "null",
+	tFunc: "func", tStruct: "struct", tTaskm: "taskm", tPtr: "ptr", tCopyd: "Copyd", tNull: "null", tTypeVar: "typevar",
 }
 
 func (t *Type) String() string {
@@ -137,6 +138,10 @@ func assignable(from, to *Type) bool {
 			return assignable(from.Elem, to.Elem) || to.Elem.Kind == tAny || from.Elem.Kind == tAny
 		}
 		return assignable(from, to.Elem) || to.Elem.Kind == tAny
+	}
+	// 类型变量（泛型函数）：与任何类型互相可赋
+	if from.Kind == tTypeVar || to.Kind == tTypeVar {
+		return true
 	}
 	// Copyd：与内部类型互相可赋
 	if from.Kind == tCopyd {
@@ -218,7 +223,7 @@ func parseTypeStr(s string) (*Type, error) {
 		return tOutputStreamV, nil
 	case "Channel":
 		return tChannelV, nil
-	case "Task":
+	case "Task", "thread":
 		return tTaskV, nil
 	case "memorize":
 		return tMemorizeV, nil
@@ -304,8 +309,9 @@ func (e *CheckError) Error() string {
 }
 
 type cVar struct {
-	typ  *Type
-	init bool
+	typ     *Type
+	init    bool
+	isConst bool
 }
 
 type cScope struct {
@@ -342,6 +348,7 @@ type checker struct {
 	impls      map[string]*ImplDef
 	curRet     *Type
 	curSubst   map[string]*Type // 泛型方法体/调用点的类型参数替换
+	typeVars   map[string]bool  // 泛型函数当前作用域的类型参数（func<T,...>）
 }
 
 // Typecheck 执行 §11.1 的全部编译期严格检查。
@@ -357,7 +364,7 @@ func Typecheck(prog *Program) error {
 		if _, dup := c.fns[f.Name]; dup {
 			return &CheckError{Msg: fmt.Sprintf("CompileError: duplicate function %q", f.Name), Pos: f.Pos}
 		}
-		c.fns[f.Name] = &Func{Name: f.Name, Params: f.Params, Ret: f.Ret, Body: f.Body, Pos: f.Pos}
+		c.fns[f.Name] = &Func{Name: f.Name, TypeParams: f.TypeParams, Params: f.Params, Ret: f.Ret, Body: f.Body, Pos: f.Pos}
 	}
 	for _, s := range prog.Structs {
 		if _, dup := c.structs[s.Name]; dup {
@@ -401,7 +408,7 @@ func Typecheck(prog *Program) error {
 			if len(m.Params) > 0 && m.Params[0].Name == "self" && m.Params[0].Type == "" {
 				m.Params[0].Type = im.Type
 			}
-			fn := &Func{Name: m.Name, Params: m.Params, Ret: m.Ret, Body: m.Body, Pos: m.Pos}
+			fn := &Func{Name: m.Name, TypeParams: m.TypeParams, Params: m.Params, Ret: m.Ret, Body: m.Body, Pos: m.Pos}
 			if len(m.Params) > 0 && m.Params[0].Name == "self" {
 				if _, dup := def.SelfMethods[fn.Name]; dup {
 					return &CheckError{Msg: fmt.Sprintf("CompileError: duplicate method %q on %s", fn.Name, im.Type), Pos: m.Pos}
@@ -451,7 +458,7 @@ func Typecheck(prog *Program) error {
 		prev := c.curSubst
 		c.curSubst = subst
 		for _, m := range im.Methods {
-			if err := c.checkFunc(&Func{Name: m.Name, Params: m.Params, Ret: m.Ret, Body: m.Body, Pos: m.Pos}); err != nil {
+			if err := c.checkFunc(&Func{Name: m.Name, TypeParams: m.TypeParams, Params: m.Params, Ret: m.Ret, Body: m.Body, Pos: m.Pos}); err != nil {
 				c.curSubst = prev
 				return err
 			}
@@ -529,7 +536,7 @@ func (c *checker) substType(s string, subst map[string]*Type, pos Pos) (*Type, e
 		return tOutputStreamV, nil
 	case "Channel":
 		return tChannelV, nil
-	case "Task":
+	case "Task", "thread":
 		return tTaskV, nil
 	case "memorize":
 		return tMemorizeV, nil
@@ -593,6 +600,10 @@ func (c *checker) substType(s string, subst map[string]*Type, pos Pos) (*Type, e
 	if _, ok := c.interfaces[base]; ok {
 		return tAnyV, nil
 	}
+	// 泛型函数的类型变量（func<T,...>）：T 在作用域内即为类型变量
+	if c.typeVars[base] {
+		return &Type{Kind: tTypeVar, FName: base}, nil
+	}
 	return nil, &CheckError{Msg: fmt.Sprintf("CompileError: unknown type %q", s), Pos: pos}
 }
 
@@ -628,6 +639,16 @@ func (c *checker) paramType(p Param, pos Pos) (*Type, error) {
 }
 
 func (c *checker) checkFunc(f *Func) error {
+	// 泛型函数：类型参数先进入作用域（返回类型/参数都可用 T）
+	prevVars := c.typeVars
+	if len(f.TypeParams) > 0 {
+		c.typeVars = map[string]bool{}
+		for _, tp := range f.TypeParams {
+			c.typeVars[tp] = true
+		}
+	}
+	defer func() { c.typeVars = prevVars }()
+
 	var retType *Type
 	if f.Ret != "" {
 		t, err := c.substType(f.Ret, c.curSubst, f.Pos)
@@ -727,11 +748,16 @@ func (c *checker) checkStmt(st Stmt, sc *cScope) error {
 		}
 		return c.checkBlock(s.Body, inner)
 	case *DeclStmt:
-		typ, err := c.substType(s.Type, c.curSubst, s.Pos)
+		// 变量修饰：copyd = 传时复制（类型标注追加 [Copyd]）；const = 常量
+		typStr := s.Type
+		if s.Decor == "copyd" {
+			typStr = typStr + "[Copyd]"
+		}
+		typ, err := c.substType(typStr, c.curSubst, s.Pos)
 		if err != nil {
 			return err
 		}
-		v := &cVar{typ: typ, init: false}
+		v := &cVar{typ: typ, init: false, isConst: s.Decor == "const"}
 		if s.Init != nil {
 			it, err := c.infer(s.Init, sc)
 			if err != nil {
@@ -755,6 +781,9 @@ func (c *checker) checkStmt(st Stmt, sc *cScope) error {
 			v := sc.lookup(target.Name)
 			if v == nil {
 				return c.errf(target.Pos, "CompileError: assignment to undeclared identifier %q", target.Name)
+			}
+			if v.isConst {
+				return c.errf(target.Pos, "CompileError: const 变量 %q 不可重新赋值", target.Name)
 			}
 			if !assignable(t, v.typ) {
 				return c.errf(s.Pos, "TypeError: cannot assign %s to %s", t, v.typ)
@@ -1216,11 +1245,34 @@ func (c *checker) methodType(recv *Type, name string, args []*Type, pos Pos) (*T
 			return tAnyV, nil
 		}
 	case tTask:
-		if name == "done" {
+		// thread 类方法（xmind：merge / pid / talk）
+		switch name {
+		case "merge":
+			if len(args) < 1 {
+				return nil, c.errf(pos, "CompileError: thread.merge(fn, args...) requires at least 1 arg")
+			}
+			if args[0].Kind != tFunc {
+				return nil, c.errf(pos, "TypeError: thread.merge second arg must be a function reference, got %s", args[0])
+			}
+			if args[0].FName != "" {
+				if fn, ok := c.fns[args[0].FName]; ok && len(fn.Params) != len(args)-1 {
+					return nil, c.errf(pos, "CompileError: %s expects %d args, got %d", fn.Name, len(fn.Params), len(args)-1)
+				}
+			}
+			return tNilV, nil
+		case "pid":
 			if err := c.checkArity(name, 0, len(args), pos); err != nil {
 				return nil, err
 			}
-			return tBoolV, nil
+			return tIntV, nil
+		case "talk":
+			if err := c.checkArity(name, 1, len(args), pos); err != nil {
+				return nil, err
+			}
+			if args[0].Kind != tChannel {
+				return nil, c.errf(pos, "TypeError: thread.talk requires a channel, got %s", args[0])
+			}
+			return tNilV, nil
 		}
 	case tMemory:
 		switch name {
@@ -1241,11 +1293,11 @@ func (c *checker) methodType(recv *Type, name string, args []*Type, pos Pos) (*T
 	case tTaskm:
 		switch name {
 		case "spawn":
-			// v2：taskm.spawn() 无参，创建线程返回 pid
+			// xmind：taskm.spawn() 无参，返回 thread 类
 			if len(args) != 0 {
 				return nil, c.errf(pos, "CompileError: taskm.spawn() takes no args, got %d", len(args))
 			}
-			return tIntV, nil
+			return tTaskV, nil
 		case "merge":
 			// v2：taskm.merge(pid, fn, args...)
 			if len(args) < 2 {
@@ -1397,6 +1449,13 @@ func (c *checker) inferCall(x *CallExpr, sc *cScope) (*Type, error) {
 			return nil, err
 		}
 		if fn.Ret != "" {
+			if len(fn.TypeParams) > 0 {
+				gs, err := c.inferGenSubst(fn, x.Args, sc)
+				if err != nil {
+					return nil, err
+				}
+				return c.substType(fn.Ret, gs, x.Pos)
+			}
 			return c.resolveType(fn.Ret, x.Pos)
 		}
 		return tFuncBufferV, nil
@@ -1444,6 +1503,23 @@ func (c *checker) inferArgs(args []Expr, sc *cScope) ([]*Type, error) {
 	return out, nil
 }
 
+// inferGenSubst 从实参推断泛型函数的类型参数（func<T,...>）。
+func (c *checker) inferGenSubst(fn *Func, args []Expr, sc *cScope) (map[string]*Type, error) {
+	argTys, err := c.inferArgs(args, sc)
+	if err != nil {
+		return nil, err
+	}
+	genSubst := map[string]*Type{}
+	for i, p := range fn.Params {
+		for _, tp := range fn.TypeParams {
+			if genSubst[tp] == nil && strings.Contains(p.Type, tp) && i < len(argTys) {
+				genSubst[tp] = argTys[i]
+			}
+		}
+	}
+	return genSubst, nil
+}
+
 // checkCallArgs 检查实参与形参个数、类型。
 func (c *checker) checkCallArgs(fn *Func, args []Expr, sc *cScope, pos Pos) error {
 	argTys, err := c.inferArgs(args, sc)
@@ -1453,8 +1529,15 @@ func (c *checker) checkCallArgs(fn *Func, args []Expr, sc *cScope, pos Pos) erro
 	if len(argTys) != len(fn.Params) {
 		return c.errf(pos, "CompileError: %s expects %d args, got %d", fn.Name, len(fn.Params), len(argTys))
 	}
+	genSubst := map[string]*Type{}
+	if len(fn.TypeParams) > 0 {
+		genSubst, err = c.inferGenSubst(fn, args, sc)
+		if err != nil {
+			return err
+		}
+	}
 	for i, p := range fn.Params {
-		pt, err := c.paramType(p, pos)
+		pt, err := c.substType(p.Type, genSubst, pos)
 		if err != nil {
 			return err
 		}

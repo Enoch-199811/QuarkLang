@@ -218,11 +218,12 @@ func hashKey(v Value) string { return v.TypeName() + ":" + v.String() }
 // Func is a compiled QuarkLang function. Ret != "" means the call yields the
 // value of `return expr;`; otherwise the call yields the whole FuncBuffer.
 type Func struct {
-	Name   string
-	Params []Param
-	Ret    string
-	Body   *Block
-	Pos    Pos
+	Name       string
+	TypeParams []string // 泛型函数 func<T,...>（xmind §函数）
+	Params     []Param
+	Ret        string
+	Body       *Block
+	Pos        Pos
 }
 
 // execCtx 是函数执行的内部上下文（v2：语言面不再有 FuncBuffer）。
@@ -318,6 +319,15 @@ type Task struct {
 	BlockID int
 	Busy    bool // 是否有函数占用（done 即 !Busy）
 }
+
+// ThreadValue 是 thread 类实例（xmind：taskm.spawn() 返回 thread 类，内含 pid）。
+type ThreadValue struct {
+	Pid int
+	t   *Task
+}
+
+func (tv *ThreadValue) TypeName() string { return "thread" }
+func (tv *ThreadValue) String() string   { return "<thread " + itoa(tv.Pid) + ">" }
 
 func (t *Task) TypeName() string { return "Task" }
 func (t *Task) String() string   { return "<Task " + itoa(t.Pid) + ">" }

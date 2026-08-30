@@ -377,19 +377,27 @@ func (in *interp) execStmt(st Stmt, sc *scope, fb *FuncBuffer) error {
 	case *ExprStmt:
 		_, err := in.evalExpr(s.X, sc, fb)
 		return err
-	case *OutStmt:
-		v, err := in.evalExpr(s.X, sc, fb)
-		if err != nil {
-			return err
-		}
-		fb.Tail.Append(v)
-		return nil
 	case *LogStmt:
+		// log 记录日志并结束函数（返回什么都可以）
 		v, err := in.evalExpr(s.X, sc, fb)
 		if err != nil {
 			return err
 		}
 		fb.Log.Append(StrV(v.String()))
+		return errReturn
+	case *TryStmt:
+		// try/catch：try 块出错（非 return）时把错误装入 catch 变量（interface{}），执行 catch 块
+		err := in.execBlock(s.Try, sc, fb)
+		if err != nil {
+			if errors.Is(err, errReturn) {
+				return err
+			}
+			inner := newScope(sc)
+			_ = inner.declare(s.CatchVar, StrV(err.Error()), s.Pos) // 错误装入声明类型（interface{} 等），自由系统
+			if cerr := in.execBlock(s.Catch, inner, fb); cerr != nil {
+				return cerr
+			}
+		}
 		return nil
 	case *ReturnStmt:
 		if s.X != nil {
@@ -512,6 +520,16 @@ func (in *interp) evalExpr(e Expr, sc *scope, fb *FuncBuffer) (Value, error) {
 		return BoolV(x.V), nil
 	case *NullLit:
 		return NilV{}, nil
+	case *StructLit:
+		sv := &StructValue{SType: ".", Fields: map[string]Value{}}
+		for _, f := range x.Fields {
+			v, err := in.evalExpr(f.X, sc, fb)
+			if err != nil {
+				return nil, err
+			}
+			sv.Fields[f.Name] = v
+		}
+		return sv, nil
 	case *Ident:
 		if x.Name == "true" {
 			return BoolV(true), nil

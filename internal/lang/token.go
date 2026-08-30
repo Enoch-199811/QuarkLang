@@ -59,6 +59,8 @@ const (
 	TLog
 	TAmper
 	TNull
+	TTry
+	TCatch
 )
 
 var tokenNames = [...]string{
@@ -67,7 +69,7 @@ var tokenNames = [...]string{
 	"'while'", "'for'", "'in'", "'true'", "'false'",
 	"'('", "')'", "'{'", "'}'", "'['", "']'", "';'", "','", "'.'", "':'", "'::'", "'@'",
 	"'='", "'+'", "'-'", "'*'", "'/'", "'%'", "'!'", "'=='", "'!='", "'<'", "'<='", "'>'", "'>='", "'&&'", "'||'",
-	"'log'", "'&'", "'null'",
+	"'log'", "'&'", "'null'", "'try'", "'catch'",
 }
 
 func (k TokenKind) String() string {
@@ -114,6 +116,8 @@ var keywords = map[string]TokenKind{
 	"false":     TFalse,
 	"log":       TLog,
 	"null":      TNull,
+	"try":       TTry,
+	"catch":     TCatch,
 }
 
 type lexer struct {

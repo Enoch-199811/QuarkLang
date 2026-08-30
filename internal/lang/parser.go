@@ -78,13 +78,18 @@ func (p *parser) expectIdent(what string) (Token, error) {
 	return p.advance(), nil
 }
 
-// expectMemberName accepts a member/method name; "log" is a keyword but
-// also the FuncBuffer.log member name.
+// expectMemberName accepts a member/field name; keywords (like in/out/log)
+// are valid names in member position.
 func (p *parser) expectMemberName(what string) (Token, error) {
-	if p.curIs(TIdent) || p.curIs(TLog) {
+	if isWordToken(p.cur().Kind) {
 		return p.advance(), nil
 	}
 	return Token{}, p.errf(p.cur(), "expected %s, got %s", what, p.cur().Kind)
+}
+
+// isWordToken 判断是否为标识符或关键字（非标点/字面量）。
+func isWordToken(k TokenKind) bool {
+	return k == TIdent || (k > TStr && k < TLParen)
 }
 
 func (p *parser) parseProgram() (*Program, error) {
@@ -140,13 +145,17 @@ func (p *parser) parseFunc() (*FuncDecl, error) {
 		return nil, err
 	}
 	fn.Params = params
-	// 可选返回类型注解：func f(...) T { ... }
+	// 返回类型注解必填（新模型：函数必须声明返回类型；main 入口可省略，视为 void）
 	if p.curIs(TIdent) || p.curIs(TInterface) {
 		typ, err := p.parseType()
 		if err != nil {
 			return nil, err
 		}
 		fn.Ret = typ
+	} else if name.Text == "main" {
+		fn.Ret = "void"
+	} else {
+		return nil, p.errf(p.cur(), "函数必须声明返回类型：func %s(...) 返回类型 { ... }", name.Text)
 	}
 	body, err := p.parseBlock()
 	if err != nil {
@@ -466,15 +475,35 @@ func (p *parser) parseBlock() (*Block, error) {
 func (p *parser) parseStmt() (Stmt, error) {
 	switch p.cur().Kind {
 	case TOut:
-		p.advance()
-		x, err := p.parseExpr()
+		return nil, p.errf(p.cur(), "out 已在新模型中移除：请用 return expr; 返回结果")
+	case TTry:
+		kw := p.advance()
+		tryB, err := p.parseBlock()
 		if err != nil {
 			return nil, err
 		}
-		if _, err := p.expect(TSemi, "';'"); err != nil {
+		if _, err := p.expect(TCatch, "'catch'"); err != nil {
 			return nil, err
 		}
-		return &OutStmt{X: x}, nil
+		if _, err := p.expect(TLParen, "'('"); err != nil {
+			return nil, err
+		}
+		cv, err := p.expectIdent("catch variable")
+		if err != nil {
+			return nil, err
+		}
+		ct, err := p.parseType()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(TRParen, "')'"); err != nil {
+			return nil, err
+		}
+		catchB, err := p.parseBlock()
+		if err != nil {
+			return nil, err
+		}
+		return &TryStmt{Try: tryB, CatchVar: cv.Text, CatchVarType: ct, Catch: catchB, Pos: Pos{Line: kw.Line, Col: kw.Col}}, nil
 	case TLog:
 		kw := p.advance()
 		x, err := p.parseExpr()
@@ -797,6 +826,38 @@ func (p *parser) parsePrimary() (Expr, error) {
 	case TNull:
 		p.advance()
 		return &NullLit{Pos: pos}, nil
+	case TDot:
+		// 结构体字面量/展开式：.{ field: expr, ... }
+		p.advance()
+		if _, err := p.expect(TLBrace, "'{'"); err != nil {
+			return nil, err
+		}
+		lit := &StructLit{Pos: pos}
+		if !p.curIs(TRBrace) {
+			for {
+				name, err := p.expectMemberName("field name")
+				if err != nil {
+					return nil, err
+				}
+				if _, err := p.expect(TColon, "':'"); err != nil {
+					return nil, err
+				}
+				v, err := p.parseExpr()
+				if err != nil {
+					return nil, err
+				}
+				lit.Fields = append(lit.Fields, StructLitField{Name: name.Text, X: v})
+				if p.curIs(TComma) {
+					p.advance()
+					continue
+				}
+				break
+			}
+		}
+		if _, err := p.expect(TRBrace, "'}'"); err != nil {
+			return nil, err
+		}
+		return lit, nil
 	case TIdent:
 		p.advance()
 		return &Ident{Name: tok.Text, Pos: pos}, nil

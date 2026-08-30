@@ -35,12 +35,13 @@ const (
 )
 
 type Type struct {
-	Kind  tKind
-	Elem  *Type
-	Key   *Type
-	Val   *Type
-	FName string  // tFunc: 函数名（"" = 未知）；tStruct: 结构体名
-	Args  []*Type // tStruct: 泛型实例实参
+	Kind   tKind
+	Elem   *Type
+	Key    *Type
+	Val    *Type
+	FName  string          // tFunc: 函数名（"" = 未知）；tStruct: 结构体名
+	Args   []*Type         // tStruct: 泛型实例实参
+	Fields map[string]*Type // tStruct 匿名（FName="."）：字段类型表
 }
 
 func mk(k tKind) *Type         { return &Type{Kind: k} }
@@ -669,12 +670,22 @@ func (c *checker) checkStmt(st Stmt, sc *cScope) error {
 	case *ExprStmt:
 		_, err := c.infer(s.X, sc)
 		return err
-	case *OutStmt:
-		_, err := c.infer(s.X, sc)
-		return err
 	case *LogStmt:
 		_, err := c.infer(s.X, sc)
 		return err
+	case *TryStmt:
+		if err := c.checkBlock(s.Try, sc); err != nil {
+			return err
+		}
+		ct, err := c.resolveType(s.CatchVarType, s.Pos)
+		if err != nil {
+			return err
+		}
+		inner := newCScope(sc)
+		if err := inner.declare(s.CatchVar, &cVar{typ: ct, init: true}, s.Pos); err != nil {
+			return err
+		}
+		return c.checkBlock(s.Catch, inner)
 	case *ReturnStmt:
 		if s.X != nil {
 			t, err := c.infer(s.X, sc)
@@ -804,6 +815,8 @@ func posOf(e Expr) Pos {
 		return x.Pos
 	case *NullLit:
 		return x.Pos
+	case *StructLit:
+		return x.Pos
 	case *Ident:
 		return x.Pos
 	case *BinOp:
@@ -854,6 +867,17 @@ func (c *checker) infer(e Expr, sc *cScope) (*Type, error) {
 		return tBoolV, nil
 	case *NullLit:
 		return &Type{Kind: tNull}, nil
+	case *StructLit:
+		// 匿名结构体字面量（.{in,out} 等）：带字段类型表的匿名结构体
+		fields := map[string]*Type{}
+		for _, f := range x.Fields {
+			ft, err := c.infer(f.X, sc)
+			if err != nil {
+				return nil, err
+			}
+			fields[f.Name] = ft
+		}
+		return &Type{Kind: tStruct, FName: ".", Fields: fields}, nil
 	case *Ident:
 		if x.Name == "true" || x.Name == "false" {
 			return tBoolV, nil
@@ -1020,6 +1044,12 @@ func (c *checker) memberType(recv *Type, name string, pos Pos) (*Type, error) {
 	case tMemorize:
 		// v0.1 memorize 为内置签名状态对象，无公开成员
 	case tStruct:
+		if recv.Fields != nil {
+			if ft, ok := recv.Fields[name]; ok {
+				return ft, nil
+			}
+			return nil, c.errf(pos, "TypeError: no member %q on 匿名结构体", name)
+		}
 		if def, ok := c.structs[recv.FName]; ok {
 			if typ, exists := def.Types[name]; exists {
 				subst := c.instanceSubst(def, recv)

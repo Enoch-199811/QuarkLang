@@ -49,6 +49,7 @@ func Compile(src string) (*Program, error) {
 	if err != nil {
 		return nil, err
 	}
+	prog.Src = src
 	if err := Typecheck(prog); err != nil {
 		return nil, err
 	}
@@ -104,7 +105,8 @@ func (p *parser) expectMemberName(what string) (Token, error) {
 // isBuiltinTypeName 判断是否为内建类型名（type-first 声明用）。
 func isBuiltinTypeName(s string) bool {
 	switch s {
-	case "int", "float", "bool", "String", "void", "List", "HashTable", "Channel", "thread", "Task", "memorize", "memory", "IOStream", "Copyd":
+	case "int", "float", "bool", "String", "void", "List", "HashTable", "Channel", "thread", "Task", "memorize", "memory", "IOStream", "Copyd",
+		"istream", "ostream", "ifstream", "ofstream", "iofstream", "InputStream", "OutputStream":
 		return true
 	}
 	return false
@@ -335,11 +337,16 @@ func (p *parser) parseFunc() (*FuncDecl, error) {
 	} else {
 		return nil, p.errf(p.cur(), "函数必须声明返回类型：func %s(...) 返回类型 { ... }", name.Text)
 	}
+	startTok := p.cur() // parseBlock 前：'{' 之后第一个 token（起始行）
 	body, err := p.parseBlock()
 	if err != nil {
 		return nil, err
 	}
 	fn.Body = body
+	fn.BodyStart = Pos{Line: startTok.Line, Col: startTok.Col}
+	if p.i > 0 {
+		fn.BodyEnd = Pos{Line: p.toks[p.i-1].Line, Col: p.toks[p.i-1].Col} // 结束 '}'
+	}
 	return fn, nil
 }
 

@@ -2,6 +2,7 @@ package lang
 
 import (
 	"bufio"
+	"container/heap"
 	"errors"
 	"fmt"
 	"io"
@@ -30,11 +31,15 @@ type scope struct {
 	outer *scope
 }
 
+// newScope 懒分配 vars（nil map 直到首个 declare —— 高计算场景省空 map 分配）。
 func newScope(outer *scope) *scope {
-	return &scope{vars: map[string]Value{}, outer: outer}
+	return &scope{outer: outer}
 }
 
 func (s *scope) declare(name string, v Value, pos Pos) error {
+	if s.vars == nil {
+		s.vars = map[string]Value{}
+	}
 	if _, dup := s.vars[name]; dup {
 		return &RunError{Msg: fmt.Sprintf("CompileError: duplicate declaration of %q", name), Pos: pos}
 	}
@@ -44,6 +49,9 @@ func (s *scope) declare(name string, v Value, pos Pos) error {
 
 func (s *scope) set(name string, v Value, pos Pos) error {
 	for sc := s; sc != nil; sc = sc.outer {
+		if sc.vars == nil {
+			continue
+		}
 		if _, ok := sc.vars[name]; ok {
 			sc.vars[name] = v
 			return nil
@@ -73,28 +81,63 @@ type builtinFn func(args []Value, pos Pos, ctx *execCtx) (Value, error)
 type MemBlock struct {
 	ID          int
 	Size        int
+	Used        int  // 已用空间（占用度 = Used/Size，<1 表示内部有空闲）
 	Dirty       bool // 区块被更改会记录（脏标记）
 	OwnerPID    int  // 所属协程（0 = 全局）
 	Reclaimable bool // 无人占用，可回收
 }
 
+// memHeap 按占用度（Used 升序）维护 block 的最小堆：占用度最小者优先。
+type memHeap []*MemBlock
+
+func (h memHeap) Len() int            { return len(h) }
+func (h memHeap) Less(i, j int) bool  { return h[i].Used < h[j].Used }
+func (h memHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
+func (h *memHeap) Push(x interface{}) { *h = append(*h, x.(*MemBlock)) }
+func (h *memHeap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[:n-1]
+	return x
+}
+
 // MemoryManager 管理 block 分配/脏标记/回收。
+// 线性分配：优先找占用程度最小（占用度 <1）的 block，进其内部空闲空间；
+// 没有则申请新 block。高并发高计算场景效率最优（xmind §内存）。
 type MemoryManager struct {
-	mu        sync.Mutex
-	nextID    int
-	blocks    map[int]*MemBlock
-	deletions []int // 消除日志（delete 记录）
+	mu      sync.Mutex
+	nextID  int
+	blocks  map[int]*MemBlock
+	minHeap memHeap // 按占用度（Used/Size）升序的最小堆
 }
 
 func NewMemoryManager() *MemoryManager {
 	return &MemoryManager{blocks: map[int]*MemBlock{}}
 }
 
+// Alloc 线性分配：占用度最小且未满的 block 优先；否则申请新 block。
 func (m *MemoryManager) Alloc(size, owner int) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// 优先复用：占用度最小的 block，内部有空闲（Used+size <= Size）就进
+	for len(m.minHeap) > 0 {
+		b := m.minHeap[0]
+		if b.Used+size <= b.Size {
+			b.Used += size
+			b.Dirty = true
+			b.OwnerPID = owner
+			b.Reclaimable = false
+			heap.Fix(&m.minHeap, 0)
+			return b.ID
+		}
+		// 满了，pop 掉（不满足分配）
+		heap.Pop(&m.minHeap)
+	}
 	m.nextID++
-	m.blocks[m.nextID] = &MemBlock{ID: m.nextID, Size: size, Dirty: true, OwnerPID: owner}
+	b := &MemBlock{ID: m.nextID, Size: size, Used: size, Dirty: true, OwnerPID: owner}
+	m.blocks[m.nextID] = b
+	heap.Push(&m.minHeap, b)
 	return m.nextID
 }
 
@@ -106,27 +149,30 @@ func (m *MemoryManager) MarkDirty(id int) {
 	}
 }
 
-// ReclaimTask 标记某协程的全部 block 为可回收（协程结束自动标记）。
+// ReclaimTask 协程结束后清空其 block 并重入最小占用堆（线性复用）。
 func (m *MemoryManager) ReclaimTask(pid int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, b := range m.blocks {
-		if b.OwnerPID == pid {
-			b.Reclaimable = true
+		if b.OwnerPID == pid && b.Used > 0 {
+			b.Used = 0
+			b.OwnerPID = 0
+			heap.Push(&m.minHeap, b)
 		}
 	}
 }
 
-// Compact 依据记录清理无人占用的空间，返回回收的 block 数（语言层面不返回）。
+// Compact 清理无人占用的 block（Used==0），返回回收数（语言层面不返回）。
 func (m *MemoryManager) Compact() (reclaimed int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for id, b := range m.blocks {
-		if b.Reclaimable {
+		if b.Used == 0 {
 			delete(m.blocks, id)
 			reclaimed++
 		}
 	}
+	m.minHeap = nil
 	return reclaimed
 }
 
@@ -137,22 +183,23 @@ func (m *MemoryManager) BlockCount() int {
 	return len(m.blocks)
 }
 
-// Delete 在消除日志中记录并直接清空该 block 的内存（xmind：delete 本质是给对应 block 日志加消除记录）。
+// Delete 把 block 标记为空（占用度归零），重新进入最小占用堆供线性复用。
 func (m *MemoryManager) Delete(id int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.blocks[id]; ok {
-		m.deletions = append(m.deletions, id) // 消除日志
-		delete(m.blocks, id)
+	if b, ok := m.blocks[id]; ok {
+		b.Used = 0
+		b.OwnerPID = 0
+		heap.Push(&m.minHeap, b)
 	}
 }
 
-// Clear 直接清理整个内存（xmind：clear() 差分计算——被 delete 标记的 block 直接清空）。
+// Clear 直接清理整个内存（清空全部 block）。
 func (m *MemoryManager) Clear() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.blocks = map[int]*MemBlock{}
-	m.deletions = m.deletions[:0]
+	m.minHeap = nil
 }
 
 // StructDef is a registered struct declaration.
@@ -500,6 +547,9 @@ func (in *interp) execStmt(st Stmt, sc *scope, ctx *execCtx) error {
 			if err != nil {
 				return &RunError{Msg: err.Error(), Pos: s.Pos, Ctx: ctx}
 			}
+			if inner.vars == nil {
+				inner.vars = map[string]Value{}
+			}
 			inner.vars[s.Var] = item
 			if err := in.execBlock(s.Body, inner, ctx); err != nil {
 				return err
@@ -826,6 +876,7 @@ func (in *interp) callFunc(fn *Func, args []Value, pos Pos) (Value, error) {
 		}
 	}
 	ctx := NewExecCtx(fn, args, pos)
+	defer putExecCtx(ctx)
 	if err := in.execute(ctx); err != nil {
 		return nil, err
 	}
@@ -1175,6 +1226,60 @@ func (in *interp) callMethod(obj Value, name string, args []Value, ctx *execCtx,
 			}
 			return StrV(strings.TrimRight(line, "\r\n")), nil
 		}
+	case *InputStream:
+		switch name {
+		case "readln":
+			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
+				return nil, err
+			}
+			line, err := bufio.NewReader(o.R).ReadString('\n')
+			if err != nil && line == "" {
+				return nil, &RunError{Msg: "IOError: " + err.Error(), Pos: pos, Ctx: ctx}
+			}
+			return StrV(strings.TrimRight(line, "\r\n")), nil
+		case "close":
+			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
+				return nil, err
+			}
+			if c, ok := o.R.(io.Closer); ok {
+				_ = c.Close()
+			}
+			return NilV{}, nil
+		}
+	case *OutputStream:
+		switch name {
+		case "println", "print":
+			line := ""
+			for i, a := range args {
+				if i > 0 {
+					line += " "
+				}
+				line += a.String()
+			}
+			if name == "println" {
+				line += "\n"
+			}
+			if _, err := fmt.Fprint(o.W, line); err != nil {
+				return nil, &RunError{Msg: "IOError: " + err.Error(), Pos: pos, Ctx: ctx}
+			}
+			return NilV{}, nil
+		case "write":
+			if len(args) != 1 {
+				return nil, wantArity(name, 1, len(args), pos, ctx)
+			}
+			if _, err := fmt.Fprint(o.W, args[0].String()); err != nil {
+				return nil, &RunError{Msg: "IOError: " + err.Error(), Pos: pos, Ctx: ctx}
+			}
+			return NilV{}, nil
+		case "close":
+			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
+				return nil, err
+			}
+			if c, ok := o.W.(io.Closer); ok {
+				_ = c.Close()
+			}
+			return NilV{}, nil
+		}
 	case *StructValue:
 		def, ok := in.impls[o.SType]
 		if !ok {
@@ -1346,35 +1451,58 @@ func (in *interp) evalScopeCall(x *ScopeCall, sc *scope, ctx *execCtx) (Value, e
 	return nil, &RunError{Msg: fmt.Sprintf("CompileError: unknown scope %q", x.Scope), Pos: x.Pos, Ctx: ctx}
 }
 
+// fileInputStreamBuiltin 打开文件输入流（ifstream/FileInputStream 共用）。
+func (in *interp) fileInputStreamBuiltin(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+	if len(args) != 1 {
+		return nil, wantArity("ifstream", 1, len(args), pos, ctx)
+	}
+	p, ok := args[0].(StrV)
+	if !ok {
+		return nil, &RunError{Msg: fmt.Sprintf("TypeError: ifstream requires a path string, got %s", args[0].TypeName()), Pos: pos, Ctx: ctx}
+	}
+	f, err := os.Open(string(p))
+	if err != nil {
+		return nil, &RunError{Msg: fmt.Sprintf("IOError: cannot open %q: %v", string(p), err), Pos: pos, Ctx: ctx}
+	}
+	return &InputStream{R: f}, nil
+}
+
+// fileOutputStreamBuiltin 创建文件输出流（ofstream/FileOutputStream 共用）。
+func (in *interp) fileOutputStreamBuiltin(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+	if len(args) != 1 {
+		return nil, wantArity("ofstream", 1, len(args), pos, ctx)
+	}
+	p, ok := args[0].(StrV)
+	if !ok {
+		return nil, &RunError{Msg: fmt.Sprintf("TypeError: ofstream requires a path string, got %s", args[0].TypeName()), Pos: pos, Ctx: ctx}
+	}
+	f, err := os.Create(string(p))
+	if err != nil {
+		return nil, &RunError{Msg: fmt.Sprintf("IOError: cannot create %q: %v", string(p), err), Pos: pos, Ctx: ctx}
+	}
+	return &OutputStream{W: f}, nil
+}
+
 func (in *interp) registerIOBuiltins() {
-	in.builtins["FileInputStream"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+	in.builtins["FileInputStream"] = in.fileInputStreamBuiltin
+	in.builtins["ifstream"] = in.fileInputStreamBuiltin
+	in.builtins["iofstream"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
 		if len(args) != 1 {
-			return nil, wantArity("FileInputStream", 1, len(args), pos, ctx)
+			return nil, wantArity("iofstream", 1, len(args), pos, ctx)
 		}
 		p, ok := args[0].(StrV)
 		if !ok {
-			return nil, &RunError{Msg: fmt.Sprintf("TypeError: FileInputStream requires a path string, got %s", args[0].TypeName()), Pos: pos, Ctx: ctx}
+			return nil, &RunError{Msg: fmt.Sprintf("TypeError: iofstream requires a path string, got %s", args[0].TypeName()), Pos: pos, Ctx: ctx}
 		}
-		f, err := os.Open(string(p))
+		// 双向文件流：读+写
+		rf, err := os.OpenFile(string(p), os.O_RDWR|os.O_CREATE, 0o644)
 		if err != nil {
 			return nil, &RunError{Msg: fmt.Sprintf("IOError: cannot open %q: %v", string(p), err), Pos: pos, Ctx: ctx}
 		}
-		return &InputStream{R: f}, nil
+		return &InputStream{R: rf}, nil
 	}
-	in.builtins["FileOutputStream"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
-		if len(args) != 1 {
-			return nil, wantArity("FileOutputStream", 1, len(args), pos, ctx)
-		}
-		p, ok := args[0].(StrV)
-		if !ok {
-			return nil, &RunError{Msg: fmt.Sprintf("TypeError: FileOutputStream requires a path string, got %s", args[0].TypeName()), Pos: pos, Ctx: ctx}
-		}
-		f, err := os.Create(string(p))
-		if err != nil {
-			return nil, &RunError{Msg: fmt.Sprintf("IOError: cannot create %q: %v", string(p), err), Pos: pos, Ctx: ctx}
-		}
-		return &OutputStream{W: f}, nil
-	}
+	in.builtins["FileOutputStream"] = in.fileOutputStreamBuiltin
+	in.builtins["ofstream"] = in.fileOutputStreamBuiltin
 	in.builtins["ConsoleInputStream"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
 		if len(args) != 0 {
 			return nil, wantArity("ConsoleInputStream", 0, len(args), pos, ctx)

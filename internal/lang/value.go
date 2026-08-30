@@ -65,6 +65,15 @@ func NewList(items ...Value) *List {
 	return &List{items: items, tail: len(items)}
 }
 
+// reset 复用 List 的底层切片（对象池化用）。
+func (l *List) reset() {
+	l.items = l.items[:0]
+	l.head = 0
+	l.tail = 0
+	l.mem = nil
+	l.blockID = 0
+}
+
 func (l *List) TypeName() string { return "List" }
 
 func (l *List) String() string {
@@ -237,15 +246,42 @@ type execCtx struct {
 	pos      Pos
 }
 
+// execCtxPool 复用函数调用上下文（高计算场景：减少每次调用的堆分配）。
+var execCtxPool = sync.Pool{
+	New: func() interface{} { return &execCtx{Log: NewList()} },
+}
+
+// argsPool 复用调用参数切片（小切片：避免每次调用 makeslice）。
+var argsPool = sync.Pool{
+	New: func() interface{} { return make([]Value, 0, 8) },
+}
+
 func NewExecCtx(fn *Func, args []Value, pos Pos) *execCtx {
-	items := make([]Value, len(args))
-	copy(items, args)
-	return &execCtx{
-		Fn:   fn,
-		Args: items,
-		Log:  NewList(),
-		pos:  pos,
+	var items []Value
+	if p := argsPool.Get().([]Value); cap(p) >= len(args) {
+		items = p[:len(args)]
+	} else {
+		items = make([]Value, len(args))
 	}
+	copy(items, args)
+	ctx := execCtxPool.Get().(*execCtx)
+	ctx.Fn = fn
+	ctx.Args = items
+	ctx.pos = pos
+	ctx.result = nil
+	ctx.executed = false
+	ctx.Log.reset()
+	return ctx
+}
+
+// putExecCtx 归还执行上下文（含参数切片）到池。
+func putExecCtx(ctx *execCtx) {
+	if ctx.Args != nil && cap(ctx.Args) <= 128 {
+		argsPool.Put(ctx.Args[:0])
+	}
+	ctx.Fn = nil
+	ctx.Args = nil
+	execCtxPool.Put(ctx)
 }
 
 // ---- IO objects (spec §10) ----

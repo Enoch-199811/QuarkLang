@@ -16,6 +16,7 @@ type Program struct {
 	kindSet    bool
 	Imports    []string
 	Pub        []string // pub 宏：库中公开的符号名
+	Src        string   // 原始源码（库导出时按函数体行区间切片）
 }
 
 // MacroDef 是 macro {模式} {主体} 定义（模式/主体均为 token 序列）。
@@ -34,6 +35,8 @@ type FuncDecl struct {
 	Params     []Param
 	Ret        string
 	Body       *Block
+	BodyStart  Pos // 函数体源码行区间（库导出用）
+	BodyEnd    Pos
 	Pos        Pos
 }
 

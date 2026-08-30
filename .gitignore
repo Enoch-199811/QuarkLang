@@ -14,3 +14,4 @@ out2.txt
 # 编辑器/系统
 .DS_Store
 *.swp
+*.xmind

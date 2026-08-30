@@ -8,8 +8,9 @@ out.txt
 out2.txt
 *.out
 
-# docs worktree（独立 docs 分支，不并入 main）
+# docs / compiler worktree（独立分支，不并入 main）
 /docs/
+/compiler/
 
 # 编辑器/系统
 .DS_Store

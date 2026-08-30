@@ -12,6 +12,8 @@
 - **IO 体系**：`main(io IOStream, env, args)` 数据流注入、`IO::setIn/setOut` 与 `io.setIn/setOut` 重定向、File/Console 流；
 - **C 风格数值**：int 32 位环绕、越界字面量编译错误；`Copyd<T>` 传递复制语义。
 - **struct / impl / interface**：用户自定义结构体与接口；`self` 实例方法（`.` 调用）与静态方法（`::` 调用）；`impl Sign` 接口一致性检查；用户类型可直接实现 Sign 作为自定义签名（如 `@LocalMemorize(mb)`）。
+- **泛型 / 指针 / Copyd**：`struct<T>` / `impl<T>`（struct 有泛型参数时 impl 必须引入，实例化替换检查）；指针类型 `T&` 与 `null`（自动解引用、NullPointerError）；`Copyd<T>` 运行时包装 + `.ptr()`。
+- **真实内存系统**：block 分配（`memory.setBlock(n)` 调粒度）、写入标脏、协程结束自动标记可回收、`compact()` 实际清理。
 
 ## 快速开始
 
@@ -46,7 +48,7 @@ go test ./internal/lang/       # 35 项测试（go test -race 同样可跑）
 |---|---|
 | `main` | 集成分支（interpreter + examples 的合并结果） |
 | `interpreter` | 解释器实现（lexer/parser/typecheck/eval/runtime） |
-| `compiler` | 编译器（占位，待开始） |
+| `compiler` | 跨系统编译器（v0.2 C 转译器骨架 qkc，hello 子集） |
 | `examples` | 示例程序 |
 | `docs` | 语言设计文档（独立维护，**不并入 main**） |
 
@@ -54,7 +56,7 @@ go test ./internal/lang/       # 35 项测试（go test -race 同样可跑）
 
 ## 状态
 
-v0.1 解释器已完成：滚动 List、FuncBuffer、@memorize / @async 签名、用户自定义 struct/impl/interface 与用户自定义 Sign、out 多返回值、main(io/env/args)、IO 重定向与执行表、协程系统、编译期静态类型检查（35 项测试全绿）。待实现见 docs 分支 spec §15：Copyd<T> 的 .ptr()、block 内存系统。
+v0.2 解释器已完成：滚动 List、FuncBuffer、@memorize / @async 签名、用户自定义 struct/impl/interface 与用户自定义 Sign、泛型 struct<T>/impl<T>、指针 T& 与 null、Copyd 运行时包装 + .ptr()、真实内存系统（block/脏标记/协程回收/compact）、out 多返回值、main(io/env/args)、IO 重定向与执行表、协程系统、编译期静态类型检查（41 项测试全绿）。compiler 分支提供 v0.2 C 转译器骨架。待实现见 docs 分支 spec §15。
 
 ## 许可证
 

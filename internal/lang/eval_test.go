@@ -938,3 +938,97 @@ func main(io IOStream) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+// ============ 快速单元测试（算术/字符串/布尔/集合边界） ============
+
+func TestDivByZero(t *testing.T) {
+	_, err := runSrc(t, `
+func main(io IOStream) {
+    io.println(1 / 0);
+}`)
+	if err == nil || !strings.Contains(err.Error(), "DivisionByZeroError") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestModulo(t *testing.T) {
+	out, err := runSrc(t, `
+func main(io IOStream) {
+    io.println(7 % 3);
+    io.println(-7 % 3);
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "1\n-1\n"
+	if out != want {
+		t.Fatalf("got %q want %q", out, want)
+	}
+}
+
+func TestStringConcat(t *testing.T) {
+	out, err := runSrc(t, `
+func main(io IOStream) {
+    io.println("a" + "b" + 3);
+    io.println(1 + 2 + "x");
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "ab3\n3x\n"
+	if out != want {
+		t.Fatalf("got %q want %q", out, want)
+	}
+}
+
+func TestBoolOps(t *testing.T) {
+	out, err := runSrc(t, `
+func main(io IOStream) {
+    io.println(true && false);
+    io.println(true || false);
+    io.println(!true);
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "false\ntrue\nfalse\n"
+	if out != want {
+		t.Fatalf("got %q want %q", out, want)
+	}
+}
+
+func TestUnaryNegative(t *testing.T) {
+	out, err := runSrc(t, `
+func main(io IOStream) {
+    io.println(-5 + 3);
+    io.println(-(2 + 3));
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "-2\n-5\n"
+	if out != want {
+		t.Fatalf("got %q want %q", out, want)
+	}
+}
+
+func TestHashTableOps(t *testing.T) {
+	out, err := runSrc(t, `
+func main(io IOStream) {
+    h HashTable<String, int> = HashTable::new();
+    h.put("a", 10);
+    h.put("b", 20);
+    io.println(h.get("a"));
+    io.println(h.contains("b"));
+    io.println(h.size());
+    h.remove("a");
+    io.println(h.size());
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "10\ntrue\n2\n1\n"
+	if out != want {
+		t.Fatalf("got %q want %q", out, want)
+	}
+}

@@ -173,18 +173,18 @@ func add(a int, b int) int {
 }
 
 func main(io IOStream) {
-    pid int = taskm.spawn();
-    io.println(taskm.done(pid));
-    taskm.merge(pid, add, 3, 4);
-    io.println(taskm.done(pid));
-    taskm.block(pid);
-    io.println(taskm.done(pid));
+    thread t = taskm.spawn();
+    io.println(t.pid() > 0);
+    t.merge(add, 3, 4);
+    ch Channel = taskm.channel();
+    t.talk(ch);
+    io.println("ok");
 }`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
-	if len(lines) != 3 || lines[0] != "true" || lines[2] != "true" {
+	if len(lines) != 2 || lines[0] != "true" || lines[1] != "ok" {
 		t.Fatalf("got %q", out)
 	}
 }
@@ -342,14 +342,16 @@ func main(io IOStream) {
 
 func TestMemoryCompactReclaims(t *testing.T) {
 	src := `
-func worker() void {
-    log "w";
+func worker(ch Channel) void {
+    ch.send(1);
 }
 
 func main(io IOStream) {
-    pid int = taskm.spawn();
-    taskm.merge(pid, worker);
-    taskm.block(pid);
+    thread t = taskm.spawn();
+    ch Channel = taskm.channel();
+    t.talk(ch);
+    t.merge(worker, ch);
+    x void = ch.recv();
     GlobalMemory::compact();
 }`
 	prog, err := Compile(src)

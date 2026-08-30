@@ -912,7 +912,8 @@ func (in *interp) callMethod(obj Value, name string, args []Value, ctx *execCtx,
 				return nil, wantArity("taskm.spawn", 0, len(args), pos, ctx)
 			}
 			pid := in.newThread()
-			return IntV(pid), nil
+			t, _ := in.lookupTask(pid)
+			return &ThreadValue{Pid: pid, t: t}, nil
 		case "merge":
 			// v2：taskm.merge(pid, fn, args...) 把函数并入线程 pid 执行
 			if len(args) < 2 {
@@ -986,6 +987,37 @@ func (in *interp) callMethod(obj Value, name string, args []Value, ctx *execCtx,
 				return nil, wantArity("taskm.channel", 0, len(args), pos, ctx)
 			}
 			return NewChannel(cap), nil
+		}
+	case *ThreadValue:
+		switch name {
+		case "merge":
+			if len(args) < 1 {
+				return nil, wantArity("thread.merge", 1, len(args), pos, ctx)
+			}
+			fn, err := lookupFunc(args[0], in)
+			if err != nil {
+				return nil, &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
+			}
+			if len(args)-1 != len(fn.Params) {
+				return nil, &RunError{Msg: fmt.Sprintf("CompileError: %s expects %d args, got %d", fn.Name, len(fn.Params), len(args)-1), Pos: pos, Ctx: ctx}
+			}
+			if err := in.runOnThread(o.t, fn, args[1:], pos); err != nil {
+				return nil, err
+			}
+			return NilV{}, nil
+		case "pid":
+			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
+				return nil, err
+			}
+			return IntV(o.Pid), nil
+		case "talk":
+			if len(args) != 1 {
+				return nil, wantArity(name, 1, len(args), pos, ctx)
+			}
+			if _, ok := args[0].(*Channel); !ok {
+				return nil, &RunError{Msg: "TypeError: thread.talk 需要 channel 类实例", Pos: pos, Ctx: ctx}
+			}
+			return NilV{}, nil
 		}
 	case *MemorizeBuffer:
 		if name == "call" {

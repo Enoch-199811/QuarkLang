@@ -98,6 +98,15 @@ func (p *parser) expectMemberName(what string) (Token, error) {
 	return Token{}, p.errf(p.cur(), "expected %s, got %s", what, p.cur().Kind)
 }
 
+// isBuiltinTypeName 判断是否为内建类型名（type-first 声明用）。
+func isBuiltinTypeName(s string) bool {
+	switch s {
+	case "int", "float", "bool", "String", "void", "List", "HashTable", "Channel", "thread", "Task", "memorize", "memory", "IOStream", "Copyd":
+		return true
+	}
+	return false
+}
+
 // isWordToken 判断是否为标识符或关键字（非标点/字面量）。
 func isWordToken(k TokenKind) bool {
 	return k == TIdent || (k > TStr && k < TLParen)
@@ -203,6 +212,26 @@ func (p *parser) parseFunc() (*FuncDecl, error) {
 	if err != nil {
 		return nil, err
 	}
+	var typeParams []string
+	if p.curIs(TLt) {
+		// 泛型参数 <T, ...>（xmind §函数：泛型可有可无）
+		p.advance()
+		for {
+			tp, err := p.expectIdent("type parameter")
+			if err != nil {
+				return nil, err
+			}
+			typeParams = append(typeParams, tp.Text)
+			if p.curIs(TComma) {
+				p.advance()
+				continue
+			}
+			break
+		}
+		if _, err := p.expect(TGt, "'>'"); err != nil {
+			return nil, err
+		}
+	}
 	name, err := p.expectIdent("function name")
 	if err != nil {
 		return nil, err
@@ -210,7 +239,7 @@ func (p *parser) parseFunc() (*FuncDecl, error) {
 	if _, err := p.expect(TLParen, "'('"); err != nil {
 		return nil, err
 	}
-	fn := &FuncDecl{Name: name.Text, Pos: Pos{Line: kw.Line, Col: kw.Col}}
+	fn := &FuncDecl{Name: name.Text, TypeParams: typeParams, Pos: Pos{Line: kw.Line, Col: kw.Col}}
 	params, err := p.parseParamList()
 	if err != nil {
 		return nil, err
@@ -667,6 +696,55 @@ func (p *parser) parseStmt() (Stmt, error) {
 			return nil, err
 		}
 		return &ForStmt{Var: v.Text, Iter: iter, Body: body, Pos: Pos{Line: kw.Line, Col: kw.Col}}, nil
+	}
+	// 变量修饰：const / copyd 前缀，类型在前（<decor> <type> <name>，xmind §变量）
+	if p.curIs(TIdent) && (p.cur().Text == "const" || p.cur().Text == "copyd") {
+		decor := p.advance().Text
+		typ, err := p.parseType()
+		if err != nil {
+			return nil, err
+		}
+		name, err := p.expectIdent("variable name")
+		if err != nil {
+			return nil, err
+		}
+		st := &DeclStmt{Name: name.Text, Type: typ, Decor: decor, Pos: Pos{Line: name.Line, Col: name.Col}}
+		if p.curIs(TAssign) {
+			p.advance()
+			init, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			st.Init = init
+		}
+		if _, err := p.expect(TSemi, "';'"); err != nil {
+			return nil, err
+		}
+		return st, nil
+	}
+	// type-first declaration（xmind §变量：<type> <name>）：内建类型名开头
+	if p.curIs(TIdent) && isBuiltinTypeName(p.cur().Text) {
+		typ, err := p.parseType()
+		if err != nil {
+			return nil, err
+		}
+		name, err := p.expectIdent("variable name")
+		if err != nil {
+			return nil, err
+		}
+		st := &DeclStmt{Name: name.Text, Type: typ, Pos: Pos{Line: name.Line, Col: name.Col}}
+		if p.curIs(TAssign) {
+			p.advance()
+			init, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			st.Init = init
+		}
+		if _, err := p.expect(TSemi, "';'"); err != nil {
+			return nil, err
+		}
+		return st, nil
 	}
 	// name-first declaration: Ident followed by a type (Ident or 'interface')
 	if p.curIs(TIdent) && (p.peek().Kind == TIdent || p.peek().Kind == TInterface) {

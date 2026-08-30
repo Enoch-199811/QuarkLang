@@ -28,11 +28,12 @@ type MacroDef struct {
 // type annotation: functions WITHOUT Ret yield a FuncBuffer (out -> tail),
 // functions WITH Ret yield the value of `return expr;` directly.
 type FuncDecl struct {
-	Name   string
-	Params []Param
-	Ret    string
-	Body   *Block
-	Pos    Pos
+	Name       string
+	TypeParams []string // 泛型函数 func<T, ...>（xmind §函数）
+	Params     []Param
+	Ret        string
+	Body       *Block
+	Pos        Pos
 }
 
 // Param is a function parameter ("name Type").
@@ -127,10 +128,11 @@ type ForStmt struct {
 	Pos  Pos
 }
 type DeclStmt struct {
-	Name string
-	Type string
-	Init Expr // nil = uninitialized
-	Pos  Pos
+	Name  string
+	Type  string
+	Init  Expr   // nil = uninitialized
+	Decor string // "" | "const" | "copyd"（xmind §变量修饰表）
+	Pos   Pos
 }
 type AssignStmt struct {
 	Target Expr

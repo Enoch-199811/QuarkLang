@@ -734,6 +734,187 @@ func main(io IOStream) {
 	}
 }
 
+// ============ 泛型 / 指针 / Copyd / 内存系统 ============
+
+// 泛型结构体 + 泛型 impl + 指针成员（用户示例：链表节点）
+func TestGenericNode(t *testing.T) {
+	src := `
+struct<T> {
+    val T;
+    next node<T>&;
+} node;
+
+impl<T> {
+    func set(self, v T) {
+        self.val = v;
+    }
+    func get(self) {
+        out self.val;
+    }
+    func new() node<T> {
+        n node<T>;
+        return n;
+    }
+} node;
+
+func main(io IOStream) {
+    a node<int> = node::new();
+    a.set(42);
+    io.println(a.val);
+    b node<int> = node::new();
+    b.set(7);
+    a.next = b;
+    io.println(a.next.val);
+    io.println(a.next == null);
+    a.next = null;
+    io.println(a.next == null);
+    io.println(a.val);
+}`
+	out, err := runSrc(t, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "42\n7\nfalse\ntrue\n42\n"
+	if out != want {
+		t.Fatalf("got %q want %q", out, want)
+	}
+}
+
+// 泛型规则：struct 有泛型参数时 impl 必须引入
+func TestGenericImplRule(t *testing.T) {
+	src := `
+struct<T> {
+    val T;
+} Box;
+
+impl {
+    func new() Box {
+        b Box;
+        return b;
+    }
+} Box;
+
+func main(io IOStream) {
+    b Box<int> = Box::new();
+    io.println(b.val);
+}`
+	_, err := runSrc(t, src)
+	if err == nil || !strings.Contains(err.Error(), "impl must introduce") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// Copyd 运行时包装：副本操作不影响原值；.ptr() 取地址
+func TestCopydPtr(t *testing.T) {
+	src := `
+func f(io IOStream, a int[Copyd]) {
+    a.append(99);
+    b List<int> = a.ptr();
+    io.println(b.size());
+}
+
+func main(io IOStream) {
+    l List<int> = [1, 2];
+    f(io, l);
+    io.println(l.size());
+}`
+	out, err := runSrc(t, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "3\n2\n"
+	if out != want {
+		t.Fatalf("got %q want %q", out, want)
+	}
+}
+
+// 空指针解引用 → NullPointerError
+func TestNullPointerDeref(t *testing.T) {
+	src := `
+struct<T> {
+    val T;
+    next node<T>&;
+} node;
+
+impl<T> {
+    func new() node<T> {
+        n node<T>;
+        return n;
+    }
+} node;
+
+func main(io IOStream) {
+    a node<int> = node::new();
+    a.next = null;
+    io.println(a.next.val);
+}`
+	_, err := runSrc(t, src)
+	if err == nil || !strings.Contains(err.Error(), "NullPointerError") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// 真实内存系统：协程结束自动标记 block 可回收，compact() 实际清理
+func TestMemoryCompactReclaims(t *testing.T) {
+	src := `
+func worker() {
+    out 1;
+}
+
+func main(io IOStream) {
+    pid int = taskm.spawn(worker);
+    fb FuncBuffer = taskm.block(pid);
+    io.println(*fb.tail);
+    GlobalMemory::compact();
+}`
+	prog, err := Compile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	in, err := runWithInterp(prog, "test.qk", nil, strings.NewReader(""), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != "1\n" {
+		t.Fatalf("got output %q", out.String())
+	}
+	// worker 结束 → block 标记可回收 → compact() 后 block 数为 0
+	if n := in.mem.BlockCount(); n != 0 {
+		t.Fatalf("expected 0 blocks after compact, got %d", n)
+	}
+}
+
+// 未 compact 时，已结束协程的 block 仍存在（可回收但未清理）
+func TestMemoryBlockRetainedBeforeCompact(t *testing.T) {
+	src := `
+func worker() {
+    out 1;
+}
+
+func main(io IOStream) {
+    pid int = taskm.spawn(worker);
+    fb FuncBuffer = taskm.block(pid);
+    io.println(*fb.tail);
+}`
+	prog, err := Compile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	in, err := runWithInterp(prog, "test.qk", nil, strings.NewReader(""), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := in.mem.BlockCount(); n == 0 {
+		t.Fatal("expected retained reclaimable block before compact")
+	}
+	reclaimed := in.mem.Compact()
+	if reclaimed == 0 {
+		t.Fatal("expected compact to reclaim blocks")
+	}
+}
+
 // 访问不存在的成员 → 编译期报错
 func TestStructUnknownMember(t *testing.T) {
 	src := `

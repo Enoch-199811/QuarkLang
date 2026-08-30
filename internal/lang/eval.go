@@ -69,10 +69,78 @@ type signDef struct {
 
 type builtinFn func(args []Value, pos Pos, fb *FuncBuffer) (Value, error)
 
+// MemBlock 是全局内存管理器的分配区块（spec §14.1）。
+type MemBlock struct {
+	ID          int
+	Size        int
+	Dirty       bool // 区块被更改会记录（脏标记）
+	OwnerPID    int  // 所属协程（0 = 全局）
+	Reclaimable bool // 无人占用，可回收
+}
+
+// MemoryManager 管理 block 分配/脏标记/回收。
+type MemoryManager struct {
+	mu     sync.Mutex
+	nextID int
+	blocks map[int]*MemBlock
+}
+
+func NewMemoryManager() *MemoryManager {
+	return &MemoryManager{blocks: map[int]*MemBlock{}}
+}
+
+func (m *MemoryManager) Alloc(size, owner int) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.nextID++
+	m.blocks[m.nextID] = &MemBlock{ID: m.nextID, Size: size, Dirty: true, OwnerPID: owner}
+	return m.nextID
+}
+
+func (m *MemoryManager) MarkDirty(id int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if b, ok := m.blocks[id]; ok {
+		b.Dirty = true
+	}
+}
+
+// ReclaimTask 标记某协程的全部 block 为可回收（协程结束自动标记）。
+func (m *MemoryManager) ReclaimTask(pid int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, b := range m.blocks {
+		if b.OwnerPID == pid {
+			b.Reclaimable = true
+		}
+	}
+}
+
+// Compact 依据记录清理无人占用的空间，返回回收的 block 数（语言层面不返回）。
+func (m *MemoryManager) Compact() (reclaimed int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id, b := range m.blocks {
+		if b.Reclaimable {
+			delete(m.blocks, id)
+			reclaimed++
+		}
+	}
+	return reclaimed
+}
+
+// BlockCount 返回当前 block 总数（测试可观测）。
+func (m *MemoryManager) BlockCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.blocks)
+}
+
 // StructDef is a registered struct declaration.
 type StructDef struct {
-	Name  string
-	Types map[string]string // 成员名 → 类型注解
+	Name       string
+	TypeParams []string
+	Types      map[string]string // 成员名 → 类型注解
 }
 
 // InterfaceDef is a registered interface declaration.
@@ -86,6 +154,7 @@ type InterfaceDef struct {
 type ImplDef struct {
 	Type        string
 	Iface       string
+	TypeParams  []string
 	Methods     map[string]*Func
 	SelfMethods map[string]*Func
 }
@@ -100,13 +169,21 @@ type interp struct {
 	tasks      map[int]*Task
 	taskMu     sync.Mutex
 	nextPid    int
+	mem        *MemoryManager
 }
 
 // Run executes prog. args are command-line arguments for main(); stdin/stdout
 // are the default console streams for io.
+// Run executes prog; see runWithInterp.
 func Run(prog *Program, filename string, args []string, stdin io.Reader, stdout io.Writer) error {
+	_, err := runWithInterp(prog, filename, args, stdin, stdout)
+	return err
+}
+
+// runWithInterp 执行 prog 并返回解释器（测试可观测内存管理器等内部状态）。
+func runWithInterp(prog *Program, filename string, args []string, stdin io.Reader, stdout io.Writer) (*interp, error) {
 	if err := Typecheck(prog); err != nil {
-		return err
+		return nil, err
 	}
 	in := &interp{
 		fns:        map[string]*Func{},
@@ -116,16 +193,17 @@ func Run(prog *Program, filename string, args []string, stdin io.Reader, stdout 
 		interfaces: map[string]*InterfaceDef{},
 		impls:      map[string]*ImplDef{},
 		tasks:      map[int]*Task{},
+		mem:        NewMemoryManager(),
 	}
 	for _, f := range prog.Funcs {
 		if _, dup := in.fns[f.Name]; dup {
-			return fmt.Errorf("CompileError: duplicate function %q", f.Name)
+			return nil, fmt.Errorf("CompileError: duplicate function %q", f.Name)
 		}
 		in.fns[f.Name] = &Func{Name: f.Name, Params: f.Params, Ret: f.Ret, Body: f.Body, Pos: f.Pos}
 	}
 	for _, s := range prog.Structs {
 		if _, dup := in.structs[s.Name]; dup {
-			return fmt.Errorf("CompileError: duplicate struct %q", s.Name)
+			return nil, fmt.Errorf("CompileError: duplicate struct %q", s.Name)
 		}
 		def := &StructDef{Name: s.Name, Types: map[string]string{}}
 		for _, m := range s.Members {
@@ -135,17 +213,22 @@ func Run(prog *Program, filename string, args []string, stdin io.Reader, stdout 
 	}
 	for _, i := range prog.Interfaces {
 		if _, dup := in.interfaces[i.Name]; dup {
-			return fmt.Errorf("CompileError: duplicate interface %q", i.Name)
+			return nil, fmt.Errorf("CompileError: duplicate interface %q", i.Name)
 		}
 		in.interfaces[i.Name] = &InterfaceDef{Name: i.Name, Methods: i.Methods}
 	}
 	for _, im := range prog.Impls {
 		def, ok := in.impls[im.Type]
 		if !ok {
-			def = &ImplDef{Type: im.Type, Iface: im.Iface, Methods: map[string]*Func{}, SelfMethods: map[string]*Func{}}
+			def = &ImplDef{Type: im.Type, Iface: im.Iface, TypeParams: im.TypeParams, Methods: map[string]*Func{}, SelfMethods: map[string]*Func{}}
 			in.impls[im.Type] = def
-		} else if def.Iface == "" && im.Iface != "" {
-			def.Iface = im.Iface
+		} else {
+			if def.Iface == "" && im.Iface != "" {
+				def.Iface = im.Iface
+			}
+			if len(def.TypeParams) == 0 {
+				def.TypeParams = im.TypeParams
+			}
 		}
 		for _, m := range im.Methods {
 			if len(m.Params) > 0 && m.Params[0].Name == "self" && m.Params[0].Type == "" {
@@ -154,12 +237,12 @@ func Run(prog *Program, filename string, args []string, stdin io.Reader, stdout 
 			fn := &Func{Name: m.Name, Params: m.Params, Ret: m.Ret, Body: m.Body, Pos: m.Pos}
 			if len(m.Params) > 0 && m.Params[0].Name == "self" {
 				if _, dup := def.SelfMethods[fn.Name]; dup {
-					return fmt.Errorf("CompileError: duplicate method %q on %s", fn.Name, im.Type)
+					return nil, fmt.Errorf("CompileError: duplicate method %q on %s", fn.Name, im.Type)
 				}
 				def.SelfMethods[fn.Name] = fn
 			} else {
 				if _, dup := def.Methods[fn.Name]; dup {
-					return fmt.Errorf("CompileError: duplicate method %q on %s", fn.Name, im.Type)
+					return nil, fmt.Errorf("CompileError: duplicate method %q on %s", fn.Name, im.Type)
 				}
 				def.Methods[fn.Name] = fn
 			}
@@ -171,7 +254,7 @@ func Run(prog *Program, filename string, args []string, stdin io.Reader, stdout 
 
 	mainFn, ok := in.fns["main"]
 	if !ok {
-		return fmt.Errorf("CompileError: no main function found (expected: func main(io IOStream, ...))")
+		return nil, fmt.Errorf("CompileError: no main function found (expected: func main(io IOStream, ...))")
 	}
 	ioObj := &IOStream{In: stdin, Out: stdout, rd: bufio.NewReader(stdin)}
 	env := envTable()
@@ -189,10 +272,10 @@ func Run(prog *Program, filename string, args []string, stdin io.Reader, stdout 
 	case 3:
 		mainArgs = []Value{ioObj, env, argList}
 	default:
-		return fmt.Errorf("CompileError: main must take 1-3 params in order (io IOStream, env HashTable<String,String>, args List<String>), got %d", len(mainFn.Params))
+		return nil, fmt.Errorf("CompileError: main must take 1-3 params in order (io IOStream, env HashTable<String,String>, args List<String>), got %d", len(mainFn.Params))
 	}
 	fb := NewFuncBuffer(mainFn, mainArgs, mainFn.Pos)
-	return in.execute(fb)
+	return in, in.execute(fb)
 }
 
 // zeroInstance 构造结构体零值实例（成员按类型注解取零值）。
@@ -204,12 +287,23 @@ func (in *interp) zeroInstance(def *StructDef) *StructValue {
 	return sv
 }
 
+// baseTypeName 取泛型实例类型注解的基名（node<int> → node）。
+func baseTypeName(typ string) string {
+	if i := strings.Index(typ, "<"); i >= 0 {
+		return typ[:i]
+	}
+	return typ
+}
+
 // zeroValue 按类型注解生成零值。
 func (in *interp) zeroValue(typ string) Value {
-	if d, ok := in.structs[typ]; ok {
+	if strings.HasSuffix(typ, "&") {
+		return NilV{} // 指针零值 = null
+	}
+	if d, ok := in.structs[baseTypeName(typ)]; ok {
 		return in.zeroInstance(d)
 	}
-	switch typ {
+	switch baseTypeName(typ) {
 	case "int", "long", "char":
 		return IntV(0)
 	case "float", "double":
@@ -368,7 +462,7 @@ func (in *interp) execStmt(st Stmt, sc *scope, fb *FuncBuffer) error {
 			if err != nil {
 				return err
 			}
-		} else if def, ok := in.structs[s.Type]; ok {
+		} else if def, ok := in.structs[baseTypeName(s.Type)]; ok {
 			v = in.zeroInstance(def)
 		}
 		return sc.declare(s.Name, v, s.Pos)
@@ -384,6 +478,12 @@ func (in *interp) execStmt(st Stmt, sc *scope, fb *FuncBuffer) error {
 			obj, err := in.evalExpr(t.X, sc, fb)
 			if err != nil {
 				return err
+			}
+			if _, isNil := obj.(NilV); isNil {
+				return &RunError{Msg: "NullPointerError: assignment through null pointer", Pos: s.Pos, FB: fb}
+			}
+			if c, ok := obj.(*CopydValue); ok {
+				obj = c.V
 			}
 			sv, ok := obj.(*StructValue)
 			if !ok {
@@ -410,6 +510,8 @@ func (in *interp) evalExpr(e Expr, sc *scope, fb *FuncBuffer) (Value, error) {
 		return StrV(x.V), nil
 	case *BoolLit:
 		return BoolV(x.V), nil
+	case *NullLit:
+		return NilV{}, nil
 	case *Ident:
 		if x.Name == "true" {
 			return BoolV(true), nil
@@ -557,6 +659,12 @@ func (in *interp) evalExpr(e Expr, sc *scope, fb *FuncBuffer) (Value, error) {
 
 // evalMember reads a plain member (no call) — e.g. FuncBuffer.head/tail/log.
 func evalMember(obj Value, name string, pos Pos, fb *FuncBuffer) (Value, error) {
+	if _, isNil := obj.(NilV); isNil {
+		return nil, &RunError{Msg: "NullPointerError: dereference of null pointer", Pos: pos, FB: fb}
+	}
+	if c, ok := obj.(*CopydValue); ok {
+		return evalMember(c.V, name, pos, fb) // Copyd 透传
+	}
 	if o, ok := obj.(*Task); ok {
 		switch name {
 		case "head":
@@ -677,7 +785,7 @@ func (in *interp) callFunc(fn *Func, args []Value, pos Pos) (Value, error) {
 	}
 	for i, p := range fn.Params {
 		if isCopydType(p.Type) {
-			args[i] = deepCopy(args[i])
+			args[i] = &CopydValue{V: deepCopy(args[i])}
 		}
 	}
 	nfb := NewFuncBuffer(fn, args, pos)
@@ -814,6 +922,14 @@ func (in *interp) callMethod(obj Value, name string, args []Value, fb *FuncBuffe
 			}
 			return o, nil
 		}
+	case *CopydValue:
+		if name == "ptr" {
+			if err := wantArity(name, 0, len(args), pos, fb); err != nil {
+				return nil, err
+			}
+			return o.V, nil // .ptr() 取出 Copyd 包装的地址
+		}
+		return in.callMethod(o.V, name, args, fb, pos) // Copyd 透传
 	case *TaskManager:
 		switch name {
 		case "spawn":
@@ -883,7 +999,8 @@ func (in *interp) callMethod(obj Value, name string, args []Value, fb *FuncBuffe
 			if err := wantArity(name, 0, len(args), pos, fb); err != nil {
 				return nil, err
 			}
-			// compact() 根本不返回（spec §14.1）；v0.1 由宿主 Go GC 管理内存
+			// compact() 根本不返回（spec §14.1）；实际清理无人占用的 block
+			in.mem.Compact()
 			return NilV{}, nil
 		case "setBlock":
 			if err := wantArity(name, 1, len(args), pos, fb); err != nil {
@@ -1061,7 +1178,7 @@ func (in *interp) evalScopeCall(x *ScopeCall, sc *scope, fb *FuncBuffer) (Value,
 			if len(args) != 0 {
 				return nil, wantArity("GlobalMemory::compact", 0, len(args), x.Pos, fb)
 			}
-			// compact() 根本不返回（spec §14.1）
+			in.mem.Compact()
 			return NilV{}, nil
 		case "setBlock":
 			if len(args) != 1 {
@@ -1188,6 +1305,14 @@ func (in *interp) lookupTask(pid int) (*Task, bool) {
 func (in *interp) spawnTask(fb *FuncBuffer) (*Task, int) {
 	t := &Task{FuncBuffer: fb, doneCh: make(chan struct{})}
 	pid := in.registerTask(t)
+	t.Pid = pid
+	// 分配内存 block（全局内存管理器）；fb 的三个 List 写入时标记脏
+	blockID := in.mem.Alloc(globalMemory.BlockSize, pid)
+	t.BlockID = blockID
+	for _, l := range []*List{fb.Head, fb.Tail, fb.Log} {
+		l.mem = in.mem
+		l.blockID = blockID
+	}
 	argStrs := make([]string, 0, fb.Head.Size())
 	for i := 0; i < fb.Head.Size(); i++ {
 		if v, err := fb.Head.Get(i); err == nil {
@@ -1198,6 +1323,8 @@ func (in *interp) spawnTask(fb *FuncBuffer) (*Task, int) {
 	go func() {
 		t.err = in.execute(fb)
 		fb.Log.Append(StrV("async: done"))
+		// 协程结束：自动标记其 block 可回收（spec §14.2）
+		in.mem.ReclaimTask(t.Pid)
 		close(t.doneCh)
 	}()
 	return t, pid

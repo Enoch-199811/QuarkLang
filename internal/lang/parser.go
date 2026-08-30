@@ -191,16 +191,48 @@ func (p *parser) parseParamList() ([]Param, error) {
 	return params, nil
 }
 
+// parseTypeParams parses "<T, U, ...>".
+func (p *parser) parseTypeParams() ([]string, error) {
+	if _, err := p.expect(TLt, "'<'"); err != nil {
+		return nil, err
+	}
+	var params []string
+	for {
+		tok, err := p.expectIdent("type parameter")
+		if err != nil {
+			return nil, err
+		}
+		params = append(params, tok.Text)
+		if p.curIs(TComma) {
+			p.advance()
+			continue
+		}
+		break
+	}
+	if _, err := p.expect(TGt, "'>'"); err != nil {
+		return nil, err
+	}
+	return params, nil
+}
+
 // parseStruct parses "struct { members } [Name];".
 func (p *parser) parseStruct() (*StructDecl, error) {
 	kw, err := p.expect(TStruct, "'struct'")
 	if err != nil {
 		return nil, err
 	}
+	sd := &StructDecl{Pos: Pos{Line: kw.Line, Col: kw.Col}}
+	// 可选泛型参数：struct<T, U> { ... }
+	if p.curIs(TLt) {
+		params, err := p.parseTypeParams()
+		if err != nil {
+			return nil, err
+		}
+		sd.TypeParams = params
+	}
 	if _, err := p.expect(TLBrace, "'{"); err != nil {
 		return nil, err
 	}
-	sd := &StructDecl{Pos: Pos{Line: kw.Line, Col: kw.Col}}
 	for !p.curIs(TRBrace) {
 		if p.curIs(TEOF) {
 			return nil, p.errf(p.cur(), "unterminated struct body (missing '}')")
@@ -317,6 +349,14 @@ func (p *parser) parseImpl() (*ImplDecl, error) {
 		return nil, err
 	}
 	im := &ImplDecl{Pos: Pos{Line: kw.Line, Col: kw.Col}}
+	// 可选泛型参数：impl<T> [Iface] { ... }
+	if p.curIs(TLt) {
+		params, err := p.parseTypeParams()
+		if err != nil {
+			return nil, err
+		}
+		im.TypeParams = params
+	}
 	if p.curIs(TIdent) {
 		im.Iface = p.advance().Text
 	}
@@ -395,6 +435,11 @@ func (p *parser) parseType() (string, error) {
 			}
 			name += "[" + inner.Text + "]"
 		}
+	}
+	// & 后缀：指针类型（如 node<T>&）
+	if p.curIs(TAmper) {
+		p.advance()
+		name += "&"
 	}
 	return name, nil
 }
@@ -749,6 +794,9 @@ func (p *parser) parsePrimary() (Expr, error) {
 	case TFalse:
 		p.advance()
 		return &BoolLit{V: false, Pos: pos}, nil
+	case TNull:
+		p.advance()
+		return &NullLit{Pos: pos}, nil
 	case TIdent:
 		p.advance()
 		return &Ident{Name: tok.Text, Pos: pos}, nil

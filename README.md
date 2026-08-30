@@ -8,7 +8,7 @@
 - **@ 签名**：`f(args) @memorize(mb)`、`f(args) @async()`——对调用做第二层包装（Sign 接口，`call` 为默认要求）；
 - **滚动 List**：`*` 取开头、`next()` 滚到头、`head()==tail()` 耗尽报错、`reset()` 回卷、`for (x : l)` 语法糖；
 - **严格检查**：编译期静态类型检查（未声明标识符/成员、类型不匹配、使用前未初始化、签名注册等，错误带行号）+ 运行期硬错误 + log 回放诊断；
-- **协程系统**：`@async()`、`taskm::spawn/block/channel`、`yield;`、Task（是否完成 + 完整函数）、IOStream 执行表串行化并发 IO、调度事件自动日志；
+- **协程系统**：`@async()`、全局变量 `taskm`（`taskm.spawn(...)`→pid / `taskm.block(pid)` / `taskm.merge(pid)` / `taskm.done(pid)` / `taskm.channel([n])` 默认 1024）、Task（是否完成 + 完整函数）、IOStream 执行表（FIFO、读优先）、调度事件自动日志（spawn 带 pid / done）；
 - **IO 体系**：`main(io IOStream, env, args)` 数据流注入、`IO::setIn/setOut` 与 `io.setIn/setOut` 重定向、File/Console 流；
 - **C 风格数值**：int 32 位环绕、越界字面量编译错误；`Copyd<T>` 传递复制语义。
 - **struct / impl / interface**：用户自定义结构体与接口；`self` 实例方法（`.` 调用）与静态方法（`::` 调用）；`impl Sign` 接口一致性检查；用户类型可直接实现 Sign 作为自定义签名（如 `@LocalMemorize(mb)`）。
@@ -30,7 +30,7 @@ go test ./internal/lang/       # 35 项测试（go test -race 同样可跑）
 | `examples/localsorted.qk` | Copyd 副本排序 + out 多返回值 |
 | `examples/memo.qk` | @memorize 缓存（head→tail 映射）+ 手动 log |
 | `examples/io.qk` | IO 重定向与 Console/File 流 |
-| `examples/async.qk` | 协程：@async() / channel / taskm::spawn·block / 自动日志 |
+| `examples/async.qk` | 协程：@async() / channel / taskm.spawn→pid · block · done / 自动日志 |
 | `examples/error.qk` | ListExhaustedError + log 回放演示 |
 | `examples/struct.qk` | 用户 struct/interface/impl + 用户自定义 Sign |
 

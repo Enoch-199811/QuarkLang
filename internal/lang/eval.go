@@ -56,17 +56,17 @@ func (s *scope) paramIndex(name string) int {
 }
 
 func (s *scope) declare(name string, v Value, pos Pos) error {
-	// 参数槽位已存在（execute 绑定），局部变量才入 map
+	// 参数槽位已存在（execute 绑定），局部变量优先入线性槽位（免 map 哈希）
 	if s.paramIndex(name) >= 0 {
 		return nil
 	}
-	if s.vars == nil {
-		s.vars = map[string]Value{}
+	for _, n := range s.paramNames {
+		if n == name {
+			return &RunError{Msg: fmt.Sprintf("CompileError: duplicate declaration of %q", name), Pos: pos}
+		}
 	}
-	if _, dup := s.vars[name]; dup {
-		return &RunError{Msg: fmt.Sprintf("CompileError: duplicate declaration of %q", name), Pos: pos}
-	}
-	s.vars[name] = v
+	s.paramNames = append(s.paramNames, name)
+	s.slots = append(s.slots, v)
 	return nil
 }
 
@@ -816,6 +816,14 @@ func (in *interp) evalExpr(e Expr, sc *scope, ctx *execCtx) (Value, error) {
 						return IntV(int32(li) << uint(ri&31)), nil
 					case ">>":
 						return IntV(int32(li) >> uint(ri&31)), nil
+					case "<":
+						return BoolV(int32(li) < int32(ri)), nil
+					case "<=":
+						return BoolV(int32(li) <= int32(ri)), nil
+					case ">":
+						return BoolV(int32(li) > int32(ri)), nil
+					case ">=":
+						return BoolV(int32(li) >= int32(ri)), nil
 					}
 				}
 				return binOp(x.Op, l, rv, x.Pos, ctx)

@@ -27,7 +27,13 @@ go test ./internal/lang/     # 47 项测试（go test -race 同样可跑）
 
 ### 编译器（`compiler/` 目录，独立 Go 模块 `quarklang/compiler`，LLVM 后端）
 
-需要本机 LLVM 工具链（`clang`/`lli`；仅生成 IR 可不需要）。
+需要本机 LLVM 工具链（`clang`/`lli`/`llvm-as`；仅生成 IR 可只需要 `llvm-as`）。
+
+**依赖说明**：
+- **Go ≥ 1.21**：解释器与编译器均为纯 Go 实现，**零第三方 Go 依赖**（词法/解析/类型检查/求值/LLVM IR 发射全部手写）；
+- **LLVM 工具链**（系统包，如 `clang`/`llvm`）：`qkc -run` 用 `clang` 编译 IR 为原生二进制；测试用 `lli` 做全链路执行、`llvm-as` 做 IR 语法校验；
+- 可选：`rustc`/`gcc` 仅用于跨语言性能对比基准，不影响构建；
+- 缓存目录：qkc 增量编译缓存默认 `/tmp/quarklang-cache`（可用环境变量 `QUARK_CACHE` 覆盖）。
 
 ~~~sh
 cd compiler

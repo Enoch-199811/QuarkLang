@@ -3,6 +3,7 @@ package lang
 import (
 	"bytes"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -66,7 +67,8 @@ func benchRun(b *testing.B, src string) {
 
 func BenchmarkCompile(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		if _, err := Compile(fibSrc); err != nil {
+		src := fibSrc + "\n// " + strconv.Itoa(i)
+		if _, err := Compile(src); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -140,4 +142,17 @@ func BenchmarkFragmentationAfterChurn(b *testing.B) {
 	}
 	b.StopTimer()
 	b.ReportMetric(m.Fragmentation(), "fragmentation")
+}
+
+// Go 对照（大样本触发 GC）
+func BenchmarkGoSliceChurnGC(b *testing.B) {
+	var sink [][]int
+	for i := 0; i < b.N; i++ {
+		for j := 0; j < 100000; j++ {
+			sink = append(sink, make([]int, 64))
+			if len(sink) > 10000 {
+				sink = sink[:0]
+			}
+		}
+	}
 }

@@ -42,6 +42,10 @@ func isSymStart(s string) bool {
 
 // expandMacros 对源码做 token 级宏展开（compile 模式；无宏则原样返回）。
 func expandMacros(src string, mode string) (string, error) {
+	// 快速路径：源码不含 macro 关键字时跳过词法+展开（省 Lex 开销）
+	if !strings.Contains(src, "macro") {
+		return src, nil
+	}
 	toks, err := lang.Lex(src)
 	if err != nil {
 		return src, nil // 词法失败回退原样（让 cgen 报错）

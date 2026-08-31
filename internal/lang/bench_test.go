@@ -2,6 +2,7 @@ package lang
 
 import (
 	"bytes"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -74,3 +75,50 @@ func BenchmarkCompile(b *testing.B) {
 func BenchmarkEvalLoop1M(b *testing.B)    { benchRun(b, loopSrc) }
 func BenchmarkFib24(b *testing.B)         { benchRun(b, fibSrc) }
 func BenchmarkFuncCalls100K(b *testing.B) { benchRun(b, callSrc) }
+
+// ============ 临时数据潮汐场景（大量数据快速创建又丢弃） ============
+// QuarkLang 内存管理器：block 线性复用 + delete 即时归队，无 GC 停顿、无碎片。
+
+func BenchmarkMemManagerChurn(b *testing.B) {
+	m := NewMemoryManager()
+	ids := make([]int, 0, 64)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ids = ids[:0]
+		for j := 0; j < 100; j++ {
+			ids = append(ids, m.Alloc(64, 0))
+		}
+		for _, id := range ids {
+			m.Delete(id)
+		}
+	}
+	b.StopTimer()
+	// 复用率：绝大多数分配应命中复用（新 block 只申请一次）
+	b.ReportMetric(float64(m.ReusedCount)/float64(m.AllocCalls), "reuse-rate")
+	b.ReportMetric(float64(m.NewBlocks), "new-blocks")
+}
+
+// 对照：Go 原生 slice 分配 + GC（同潮汐规模）
+// Go 对照：大对象潮汐（强制堆分配，制造真实 GC 压力）
+var goSink [][]interface{}
+
+func BenchmarkGoSliceChurn(b *testing.B) {
+	var stats runtime.MemStats
+	runtime.ReadMemStats(&stats)
+	gcBefore := stats.NumGC
+	for i := 0; i < b.N; i++ {
+		for j := 0; j < 100; j++ {
+			s := make([]interface{}, 64)
+			for k := range s {
+				s[k] = k
+			}
+			goSink = append(goSink, s)
+			if len(goSink) > 1000 {
+				goSink = goSink[:0]
+			} // 潮汐：批量丢弃
+		}
+	}
+	b.StopTimer()
+	runtime.ReadMemStats(&stats)
+	b.ReportMetric(float64(stats.NumGC-gcBefore)/float64(b.N), "gc-count")
+}

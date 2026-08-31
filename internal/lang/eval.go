@@ -106,10 +106,13 @@ func (h *memHeap) Pop() interface{} {
 // 线性分配：优先找占用程度最小（占用度 <1）的 block，进其内部空闲空间；
 // 没有则申请新 block。高并发高计算场景效率最优（xmind §内存）。
 type MemoryManager struct {
-	mu      sync.Mutex
-	nextID  int
-	blocks  map[int]*MemBlock
-	minHeap memHeap // 按占用度（Used/Size）升序的最小堆
+	mu          sync.Mutex
+	nextID      int
+	blocks      map[int]*MemBlock
+	minHeap     memHeap // 按占用度（Used/Size）升序的最小堆
+	AllocCalls  int64   // 分配调用总数
+	ReusedCount int64   // 复用次数（命中空闲 block 内部空间）
+	NewBlocks   int64   // 新申请 block 数
 }
 
 func NewMemoryManager() *MemoryManager {
@@ -120,6 +123,7 @@ func NewMemoryManager() *MemoryManager {
 func (m *MemoryManager) Alloc(size, owner int) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.AllocCalls++
 	// 优先复用：占用度最小的 block，内部有空闲（Used+size <= Size）就进
 	for len(m.minHeap) > 0 {
 		b := m.minHeap[0]
@@ -129,6 +133,7 @@ func (m *MemoryManager) Alloc(size, owner int) int {
 			b.OwnerPID = owner
 			b.Reclaimable = false
 			heap.Fix(&m.minHeap, 0)
+			m.ReusedCount++
 			return b.ID
 		}
 		// 满了，pop 掉（不满足分配）
@@ -138,6 +143,7 @@ func (m *MemoryManager) Alloc(size, owner int) int {
 	b := &MemBlock{ID: m.nextID, Size: size, Used: size, Dirty: true, OwnerPID: owner}
 	m.blocks[m.nextID] = b
 	heap.Push(&m.minHeap, b)
+	m.NewBlocks++
 	return m.nextID
 }
 

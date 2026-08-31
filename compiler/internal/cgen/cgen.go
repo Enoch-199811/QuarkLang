@@ -975,12 +975,12 @@ type whileStmt struct {
 // ---------- 递归下降解析器 ----------
 
 type funcDef struct {
-	name       string
-	params     []string
-	ret        string
-	body       []stmt
-	selfTyp    string // impl 方法 receiver struct 名
-	selfParam  string // receiver 参数名（self）
+	name      string
+	params    []string
+	ret       string
+	body      []stmt
+	selfTyp   string // impl 方法 receiver struct 名
+	selfParam string // receiver 参数名（self）
 }
 
 type structDef struct {

@@ -102,7 +102,13 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
-		ir, err = cgen.Transpile(string(src))
+		// 宏展开（工程化：与解释器共用 token 级宏系统，compile 模式）
+		expanded, err := expandMacros(string(src), "compile")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		ir, err = cgen.Transpile(expanded)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)

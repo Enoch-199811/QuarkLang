@@ -7,16 +7,23 @@ type Pos struct {
 }
 
 // Program is a parsed QuarkLang program.
+type TypeAlias struct {
+	Name string
+	Type string
+	Pos  Pos
+}
+
 type Program struct {
-	Funcs      []*FuncDecl
-	Structs    []*StructDecl
-	Interfaces []*InterfaceDecl
-	Impls      []*ImplDecl
-	Kind       string // "main"（默认）| "library"（program 宏）
-	kindSet    bool
-	Imports    []string
-	Pub        []string // pub 宏：库中公开的符号名
-	Src        string   // 原始源码（库导出时按函数体行区间切片）
+	Funcs       []*FuncDecl
+	Structs     []*StructDecl
+	Interfaces  []*InterfaceDecl
+	Impls       []*ImplDecl
+	TypeAliases []*TypeAlias
+	Kind        string // "main"（默认）| "library"（program 宏）
+	kindSet     bool
+	Imports     []string
+	Pub         []string // pub 宏：库中公开的符号名
+	Src         string   // 原始源码（库导出时按函数体行区间切片）
 }
 
 // MacroDef 是 macro {模式} {主体} 定义（模式/主体均为 token 序列）。

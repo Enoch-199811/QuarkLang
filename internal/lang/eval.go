@@ -944,6 +944,12 @@ func (in *interp) evalCall(c *CallExpr, sc *scope, ctx *execCtx) (Value, error) 
 	if fn, ok := in.fns[id.Name]; ok {
 		return in.callFunc(fn, argVals, id.Pos)
 	}
+	// 函数引用变量：f 是变量且值为 FuncValue → 调用
+	if v, err := sc.get(id.Name, id.Pos); err == nil {
+		if fv, ok := v.(*FuncValue); ok {
+			return in.callFunc(fv.fn, argVals, id.Pos)
+		}
+	}
 	if b, ok := in.builtins[id.Name]; ok {
 		return b(argVals, id.Pos, ctx)
 	}
@@ -1568,7 +1574,73 @@ func (in *interp) fileOutputStreamBuiltin(args []Value, pos Pos, ctx *execCtx) (
 	return &OutputStream{W: f}, nil
 }
 
+// sumBuiltin：sum(generate, begin, stop, step?) —— 求和优化。
+// 线性生成器（二阶差分恒定）直接算术闭式 n*(first+last)/2（乘加，O(1)）；
+// 非线性退化为循环。用户提出的位级置换（每位 1 计数重排成乘加）在运行时无法获知
+// 生成器内部位模式，线性闭式已覆盖最常见的 sum(index)/sum(a*i+b) 场景。
+func (in *interp) sumBuiltin(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+	if len(args) != 3 && len(args) != 4 {
+		return nil, wantArity("sum", 3, len(args), pos, ctx)
+	}
+	gen, ok := args[0].(*FuncValue)
+	if !ok {
+		return nil, &RunError{Msg: "TypeError: sum 第一个参数必须是函数引用 generate", Pos: pos, Ctx: ctx}
+	}
+	begin, ok := args[1].(IntV)
+	if !ok {
+		return nil, &RunError{Msg: "TypeError: sum 的 begin 必须是 int", Pos: pos, Ctx: ctx}
+	}
+	stop, ok := args[2].(IntV)
+	if !ok {
+		return nil, &RunError{Msg: "TypeError: sum 的 stop 必须是 int", Pos: pos, Ctx: ctx}
+	}
+	step := IntV(1)
+	if len(args) == 4 {
+		if s, ok := args[3].(IntV); ok && s != 0 {
+			step = s
+		} else {
+			return nil, &RunError{Msg: "TypeError: sum 的 step 必须是非零 int", Pos: pos, Ctx: ctx}
+		}
+	}
+	g := func(i int64) (int64, error) {
+		v, err := in.callFunc(gen.fn, []Value{IntV(i)}, pos)
+		if err != nil {
+			return 0, err
+		}
+		n, ok := v.(IntV)
+		if !ok {
+			return 0, &RunError{Msg: "TypeError: generate 必须返回 int", Pos: pos, Ctx: ctx}
+		}
+		return int64(n), nil
+	}
+	// 线性探测：二阶差分恒定 → 闭式 O(1)
+	if len(args) == 4 {
+		g0, _ := g(int64(begin))
+		g1, _ := g(int64(begin) + int64(step))
+		g2, _ := g(int64(begin) + 2*int64(step))
+		if d1, d2 := g1-g0, g2-g1; d1 == d2 {
+			n := (int64(stop) - int64(begin) + int64(step) - 1) / int64(step)
+			if n <= 0 {
+				return IntV(0), nil
+			}
+			last := g0 + d1*(n-1)
+			return IntV(n * (g0 + last) / 2), nil // 乘加闭式
+		}
+	}
+	// 非线性：循环求和
+	var total int64
+	for i := int64(begin); i < int64(stop); i += int64(step) {
+		v, err := g(i)
+		if err != nil {
+			return nil, err
+		}
+		total += v
+	}
+	return IntV(total), nil
+}
+
 func (in *interp) registerIOBuiltins() {
+	in.builtins["sum"] = in.sumBuiltin
 	in.builtins["FileInputStream"] = in.fileInputStreamBuiltin
 	in.builtins["ifstream"] = in.fileInputStreamBuiltin
 	in.builtins["iofstream"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {

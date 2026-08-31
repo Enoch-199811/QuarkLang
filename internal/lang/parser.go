@@ -197,7 +197,19 @@ func (p *parser) parseProgram() (*Program, error) {
 						}
 						prog.Structs = append(prog.Structs, sd)
 					default:
-						return nil, p.errf(p.cur(), "type 只能前缀于 interface/struct")
+						// 通用类型别名：type <类型表达式> 名字;
+						typ, err := p.parseType()
+						if err != nil {
+							return nil, err
+						}
+						n, err := p.expectIdent("type alias name")
+						if err != nil {
+							return nil, err
+						}
+						if _, err := p.expect(TSemi, "';'"); err != nil {
+							return nil, err
+						}
+						prog.TypeAliases = append(prog.TypeAliases, &TypeAlias{Name: n.Text, Type: typ, Pos: Pos{Line: n.Line, Col: n.Col}})
 					}
 					continue
 				case "space":
@@ -664,6 +676,26 @@ func (p *parser) parseType() (string, error) {
 		return "", err
 	}
 	name := tok.Text
+	if name == "function" && p.curIs(TLt) {
+		// 函数类型：function<ret, p1, p2, ...>（函数引用）
+		name += "<"
+		p.advance()
+		depth := 1
+		for depth > 0 {
+			if p.curIs(TEOF) {
+				return "", p.errf(p.cur(), "unterminated function type")
+			}
+			if p.curIs(TLt) {
+				depth++
+			}
+			if p.curIs(TGt) {
+				depth--
+			}
+			name += p.cur().Text
+			p.advance()
+		}
+		return name, nil
+	}
 	if name == "pointer" {
 		// pointer 修饰：pointer <type>（等价 T&，指向堆上数据）
 		rest, err := p.parseType()

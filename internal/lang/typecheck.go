@@ -161,7 +161,8 @@ func assignable(from, to *Type) bool {
 		valOK := from.Val.Kind == tAny || to.Val.Kind == tAny || assignable(from.Val, to.Val)
 		return keyOK && valOK
 	case tFunc:
-		return to.FName == "" || from.FName == to.FName
+		// 函数名 → function<...> 签名兼容（具体签名在运行时调用处校验）
+		return to.FName == "" || strings.HasPrefix(to.FName, "function<") || strings.HasPrefix(from.FName, "function<") || from.FName == to.FName
 	case tStruct:
 		if from.FName != to.FName || len(from.Args) != len(to.Args) {
 			return false
@@ -351,6 +352,7 @@ type checker struct {
 	structs    map[string]*StructDef
 	interfaces map[string]*InterfaceDef
 	impls      map[string]*ImplDef
+	aliases    map[string]string // type <类型> 名字; 类型别名
 	curRet     *Type
 	curSubst   map[string]*Type // 泛型方法体/调用点的类型参数替换
 	typeVars   map[string]bool  // 泛型函数当前作用域的类型参数（func<T,...>）
@@ -364,6 +366,13 @@ func Typecheck(prog *Program) error {
 		structs:    map[string]*StructDef{},
 		interfaces: map[string]*InterfaceDef{},
 		impls:      map[string]*ImplDef{},
+		aliases:    map[string]string{},
+	}
+	for _, a := range prog.TypeAliases {
+		if _, dup := c.aliases[a.Name]; dup {
+			return &CheckError{Msg: fmt.Sprintf("CompileError: duplicate type alias %q", a.Name), Pos: a.Pos}
+		}
+		c.aliases[a.Name] = a.Type
 	}
 	for _, f := range prog.Funcs {
 		if _, dup := c.fns[f.Name]; dup {
@@ -632,11 +641,32 @@ func (c *checker) substType(s string, subst map[string]*Type, pos Pos) (*Type, e
 	if _, ok := c.interfaces[base]; ok {
 		return tAnyV, nil
 	}
+	// 函数类型 function<ret, p1, ...>：tFunc（签名串）
+	if base == "function" {
+		return mkFunc(s), nil
+	}
+	// 类型别名展开
+	if alias, ok := c.aliases[base]; ok {
+		return c.substType(alias, subst, pos)
+	}
 	// 泛型函数的类型变量（func<T,...>）：T 在作用域内即为类型变量
 	if c.typeVars[base] {
 		return &Type{Kind: tTypeVar, FName: base}, nil
 	}
 	return nil, &CheckError{Msg: fmt.Sprintf("CompileError: unknown type %q", s), Pos: pos}
+}
+
+// funcTypeRet 从 function<ret, p1, ...> 提取返回类型。
+func funcTypeRet(fn string) (string, bool) {
+	const p = "function<"
+	if !strings.HasPrefix(fn, p) || !strings.HasSuffix(fn, ">") {
+		return "", false
+	}
+	inner := fn[len(p) : len(fn)-1]
+	if i := strings.IndexByte(inner, ','); i >= 0 {
+		return strings.TrimSpace(inner[:i]), true
+	}
+	return strings.TrimSpace(inner), true
 }
 
 // splitTopCommas 按顶层逗号切分（忽略尖括号内逗号）。
@@ -1564,6 +1594,16 @@ func (c *checker) inferCall(x *CallExpr, sc *cScope) (*Type, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 函数引用变量：标识符调用 → 从 function<ret, p1, ...> 解析返回类型
+	if v := sc.lookup(id.Name); v != nil && v.typ.Kind == tFunc {
+		if _, err := c.inferArgs(x.Args, sc); err != nil {
+			return nil, err
+		}
+		if ret, ok := funcTypeRet(v.typ.FName); ok {
+			return c.substType(ret, c.curSubst, x.Pos)
+		}
+		return tAnyV, nil
+	}
 	if fn, ok := c.fns[id.Name]; ok {
 		if err := c.checkCallArgs(fn, x.Args, sc, x.Pos); err != nil {
 			return nil, err
@@ -1607,6 +1647,19 @@ func (c *checker) inferCall(x *CallExpr, sc *cScope) (*Type, error) {
 			return nil, err
 		}
 		return tOutputStreamV, nil
+	case "sum":
+		if len(args) != 3 && len(args) != 4 {
+			return nil, c.errf(id.Pos, "CompileError: sum(generate, begin, stop[, step]) 需要 3 或 4 个参数，got %d", len(args))
+		}
+		if args[0].Kind != tFunc {
+			return nil, c.errf(id.Pos, "TypeError: sum 第一个参数必须是函数引用，got %s", args[0])
+		}
+		for _, a := range args[1:] {
+			if a.Kind != tInt {
+				return nil, c.errf(id.Pos, "TypeError: sum 的边界参数必须是 int，got %s", a)
+			}
+		}
+		return tIntV, nil
 	}
 	return nil, c.errf(id.Pos, "CompileError: undeclared function %q", id.Name)
 }

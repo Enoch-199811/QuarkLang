@@ -656,6 +656,15 @@ func (c *checker) substType(s string, subst map[string]*Type, pos Pos) (*Type, e
 	return nil, &CheckError{Msg: fmt.Sprintf("CompileError: unknown type %q", s), Pos: pos}
 }
 
+// isBuiltinFuncName 判断是否为内置函数（可作为函数引用传递）。
+func isBuiltinFuncName(s string) bool {
+	switch s {
+	case "rand", "sum", "FileInputStream", "FileOutputStream", "ifstream", "ofstream", "iofstream", "ConsoleInputStream", "ConsoleOutputStream":
+		return true
+	}
+	return false
+}
+
 // funcTypeRet 从 function<ret, p1, ...> 提取返回类型。
 func funcTypeRet(fn string) (string, bool) {
 	const p = "function<"
@@ -1037,6 +1046,9 @@ func (c *checker) infer(e Expr, sc *cScope) (*Type, error) {
 		}
 		if _, ok := c.fns[x.Name]; ok {
 			return mkFunc(x.Name), nil
+		}
+		if isBuiltinFuncName(x.Name) {
+			return mkFunc(x.Name), nil // 内置函数作为函数引用（sum(rand, ...)）
 		}
 		return nil, c.errf(x.Pos, "CompileError: undeclared identifier %q", x.Name)
 	case *ListLit:

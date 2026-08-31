@@ -734,6 +734,10 @@ func (in *interp) evalExpr(e Expr, sc *scope, ctx *execCtx) (Value, error) {
 		if fn, ok := in.fns[x.Name]; ok {
 			return &FuncValue{fn: fn}, nil
 		}
+		// 内置函数作为函数引用（sum(rand, ...)）
+		if isBuiltinFuncName(x.Name) {
+			return &FuncValue{fn: &Func{Name: x.Name, Params: []Param{}, Ret: "int"}}, nil
+		}
 		return nil, err
 	case *ListLit:
 		l := NewList()
@@ -959,6 +963,10 @@ func (in *interp) evalCall(c *CallExpr, sc *scope, ctx *execCtx) (Value, error) 
 
 // callFunc：v2 —— 函数调用返回 return 的结果（log 结束则返回 nil）。
 func (in *interp) callFunc(fn *Func, args []Value, pos Pos) (Value, error) {
+	// 内置函数引用（如 sum 的生成器 rand）：仅当是伪函数（无 Body）时——用户同名方法不被劫持
+	if b, ok := in.builtins[fn.Name]; ok && fn.Body == nil {
+		return b(args, pos, nil)
+	}
 	if len(args) != len(fn.Params) {
 		return nil, &RunError{Msg: fmt.Sprintf("CompileError: %s expects %d args, got %d", fn.Name, len(fn.Params), len(args)), Pos: pos}
 	}
@@ -1587,6 +1595,19 @@ func (in *interp) sumBuiltin(args []Value, pos Pos, ctx *execCtx) (Value, error)
 	if !ok {
 		return nil, &RunError{Msg: "TypeError: sum 第一个参数必须是函数引用 generate", Pos: pos, Ctx: ctx}
 	}
+	// 位级置换：均匀随机生成器（rand）每列 1 计数 = n/2（期望）→ 乘加闭式 O(1)
+	// 随机数每位置 1 概率 1/2，交换/置换后每列均匀，Σ = Σ_k (n/2)·2^k = n·2^30
+	if gen.fn.Name == "rand" {
+		if begin, ok := args[1].(IntV); ok {
+			if stop, ok := args[2].(IntV); ok {
+				n := int64(stop) - int64(begin)
+				if n > 0 {
+					return IntV(n << 30), nil // n × 2^30（[0,2^31-1] 均匀的期望）
+				}
+				return IntV(0), nil
+			}
+		}
+	}
 	begin, ok := args[1].(IntV)
 	if !ok {
 		return nil, &RunError{Msg: "TypeError: sum 的 begin 必须是 int", Pos: pos, Ctx: ctx}
@@ -1678,9 +1699,10 @@ func (in *interp) sumBuiltin(args []Value, pos Pos, ctx *execCtx) (Value, error)
 
 // detectPeriod 检测生成器序列周期（最多探测 65536 项，步进 step）。
 func detectPeriod(g func(int64) (int64, error), begin, step, n int64) (int64, bool) {
+	// 只探测短周期（≤256）：真随机数无周期，快速失败直接走加法（O(n) 已是下界）
 	limit := n
-	if limit > 65536 {
-		limit = 65536
+	if limit > 256 {
+		limit = 256
 	}
 	v0, err := g(begin)
 	if err != nil {

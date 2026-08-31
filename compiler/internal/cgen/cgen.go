@@ -1132,6 +1132,41 @@ func (p *parser) parseProgram() error {
 			p.skipSpace()
 			continue
 		}
+		if name == "macro" {
+			// 宏声明跳过（v1：token 展开由解释器宏系统承担，编译器接受声明）
+			for depth := 0; p.pos < len(p.src); p.pos++ {
+				if p.src[p.pos] == '{' {
+					depth++
+				}
+				if p.src[p.pos] == '}' {
+					depth--
+					if depth == 0 && strings.Count(p.src[:p.pos], "{")%2 == 0 {
+						p.pos++
+						break
+					}
+				}
+			}
+			// 消费第二个块
+			for p.pos < len(p.src) && p.src[p.pos] != '{' {
+				p.pos++
+			}
+			if p.pos < len(p.src) {
+				for depth := 0; p.pos < len(p.src); p.pos++ {
+					if p.src[p.pos] == '{' {
+						depth++
+					}
+					if p.src[p.pos] == '}' {
+						depth--
+						if depth == 0 {
+							p.pos++
+							break
+						}
+					}
+				}
+			}
+			p.skipSpace()
+			continue
+		}
 		if name == "impl" {
 			p.skipSpace()
 			styp, err := p.expectIdent()
@@ -1232,6 +1267,14 @@ func (p *parser) parseFunc() error {
 	}
 	fd := &funcDef{name: name}
 	p.skipSpace()
+	// 泛型：func<T,...>（v1 跳过类型参数，类型擦除按 int）
+	if p.pos < len(p.src) && p.src[p.pos] == '<' {
+		for p.pos < len(p.src) && p.src[p.pos] != '>' {
+			p.pos++
+		}
+		p.pos++
+		p.skipSpace()
+	}
 	if p.pos < len(p.src) && p.src[p.pos] == '(' {
 		p.pos++
 		for {
@@ -1836,6 +1879,36 @@ func (p *parser) parsePrimary() (*expr, error) {
 				}
 			}
 			return &expr{kind: kCall, call: call}, nil
+		}
+		// 泛型调用类型参数：f<T>(args)（v1 跳过，然后作为函数调用处理）
+		if p.pos < len(p.src) && p.src[p.pos] == '<' {
+			for p.pos < len(p.src) && p.src[p.pos] != '>' {
+				p.pos++
+			}
+			p.pos++
+			p.skipSpace()
+			if p.pos < len(p.src) && p.src[p.pos] == '(' {
+				p.pos++
+				call := &callExpr{name: name}
+				for {
+					p.skipSpace()
+					if p.pos < len(p.src) && p.src[p.pos] == ')' {
+						p.pos++
+						break
+					}
+					a, err := p.parseExpr()
+					if err != nil {
+						return nil, err
+					}
+					call.args = append(call.args, a)
+					p.skipSpace()
+					if p.pos < len(p.src) && p.src[p.pos] == ',' {
+						p.pos++
+						continue
+					}
+				}
+				return &expr{kind: kCall, call: call}, nil
+			}
 		}
 		p.pos = save
 		// 下标访问：name[expr]

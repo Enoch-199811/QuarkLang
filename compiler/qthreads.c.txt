@@ -3,6 +3,40 @@
  * task：任务对象（fn + arg + 完成标志），由工作线程池执行
  * 跨系统：POSIX pthread（Linux/macOS）；Windows 分支用 _beginthreadex/WaitForSingleObject
  */
+#ifdef _WIN32
+/* Windows 载体：_beginthreadex + SRWLOCK + CONDITION_VARIABLE（用户态 API 不变） */
+#include <process.h>
+#include <windows.h>
+typedef struct { int cap, head, tail, cnt; int* buf; SRWLOCK mu; CONDITION_VARIABLE cv; } ql_channel;
+typedef struct { void (*fn)(int); int arg; volatile int done; SRWLOCK mu; } ql_task;
+ql_channel* ql_channel_new(int cap) {
+    ql_channel* c = calloc(1, sizeof(ql_channel));
+    if (cap <= 0) cap = 1024;
+    c->cap = cap; c->buf = malloc(sizeof(int) * cap);
+    InitializeSRWLock(&c->mu); InitializeConditionVariable(&c->cv);
+    return c;
+}
+int ql_send(ql_channel* c, int v) {
+    AcquireSRWLockExclusive(&c->mu);
+    while (c->cnt >= c->cap) SleepConditionVariableSRW(&c->cv, &c->mu, INFINITE, 0);
+    c->buf[(c->head + c->cnt) % c->cap] = v; c->cnt++;
+    WakeAllConditionVariable(&c->cv); ReleaseSRWLockExclusive(&c->mu);
+    return 0;
+}
+int ql_recv(ql_channel* c) {
+    AcquireSRWLockExclusive(&c->mu);
+    while (c->cnt <= 0) SleepConditionVariableSRW(&c->cv, &c->mu, INFINITE, 0);
+    int v = c->buf[c->head]; c->head = (c->head + 1) % c->cap; c->cnt--;
+    WakeAllConditionVariable(&c->cv); ReleaseSRWLockExclusive(&c->mu);
+    return v;
+}
+ql_task* ql_spawn(void) { ql_task* t = calloc(1, sizeof(ql_task)); InitializeSRWLock(&t->mu); return t; }
+static unsigned __stdcall runner_w(void* p) { ql_task* t = p; t->fn(t->arg); AcquireSRWLockExclusive(&t->mu); t->done = 1; ReleaseSRWLockExclusive(&t->mu); return 0; }
+void ql_merge(ql_task* t, void* fn, int arg) { t->fn = fn; t->arg = arg; t->done = 0; _beginthreadex(0, 0, runner_w, t, 0, 0); }
+void ql_block(ql_task* t) { while (1) { AcquireSRWLockExclusive(&t->mu); int d = t->done; ReleaseSRWLockExclusive(&t->mu); if (d) break; } }
+int ql_done(ql_task* t) { AcquireSRWLockExclusive(&t->mu); int d = t->done; ReleaseSRWLockExclusive(&t->mu); return d; }
+#else
+/* POSIX 实现（原有） */
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -60,3 +94,4 @@ char* ql_strcat(const char* a, const char* b) {
     memcpy(r, a, la); memcpy(r + la, b, lb); r[la + lb] = 0;
     return r;
 }
+#endif

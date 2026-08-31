@@ -15,7 +15,7 @@ func Transpile(src string) (string, error) {
 		return "", err
 	}
 	e := &emitter{}
-	return e.emitProgram(p.funcs, p.stmts), nil
+	return e.emitProgram(p.funcs, p.stmts, p.structs), nil
 }
 
 // ---------- LLVM IR 发射器 ----------
@@ -47,7 +47,10 @@ type emitter struct {
 	assigned     map[string]bool // 被赋值变量（SSA 直通判定）
 	runners      []string        // taskm.merge 的 runner 函数名（fn@N）
 	runnerFn     map[string]string
-	curTry       string // 当前 try 的 catch label（错误检查跳转）
+	curTry       string              // 当前 try 的 catch label（错误检查跳转）
+	structs      map[string][]string // struct 名 → 字段名
+	structVars   map[string]string   // struct 变量名 → alloca 寄存器
+	structTypes  map[string]string   // struct 变量名 → struct 类型名
 }
 
 func (e *emitter) emitInstr(f string, args ...interface{}) {
@@ -118,7 +121,13 @@ func llvmEscape(b []byte) string {
 	return sb.String()
 }
 
-func (e *emitter) emitProgram(funcs []*funcDef, mainStmts []stmt) string {
+func (e *emitter) emitProgram(funcs []*funcDef, mainStmts []stmt, structs []structDef) string {
+	e.structs = map[string][]string{}
+	e.structVars = map[string]string{}
+	e.structTypes = map[string]string{}
+	for _, sd := range structs {
+		e.structs[sd.name] = sd.fields
+	}
 	e.b.WriteString("declare i32 @printf(i8* noundef, ...)\n")
 	e.b.WriteString("declare i8* @malloc(i64)\n")
 	e.b.WriteString("declare void @free(i8*)\n")
@@ -297,6 +306,31 @@ func (e *emitter) emitStmt(s stmt) {
 			e.emitInstr("%s = call i8* @ql_spawn()", rc)
 			e.emitInstr("store i8* %s, i8** %s", rc, reg)
 			e.vars[st.name] = varInfo{reg: reg, isThread: true}
+			break
+		}
+		// struct 变量：Point p = .{1, 2} → alloca {i32 x N} + 字段 store
+		if fields, ok := e.structs[st.typ]; ok {
+			reg := e.newReg()
+			typ := "{ "
+			for i := 0; i < len(fields); i++ {
+				if i > 0 {
+					typ += ", "
+				}
+				typ += "i32"
+			}
+			typ += " }"
+			e.emitInstr("%s = alloca %s, align 8", reg, typ)
+			if st.init != nil && st.init.kind == kStructLit {
+				for i, v := range st.init.sl.values {
+					val, _ := e.compileExpr(v)
+					f := e.newReg()
+					e.emitInstr("%s = getelementptr inbounds %s, %s* %s, i32 0, i32 %d", f, typ, typ, reg, i)
+					e.emitInstr("store i32 %s, i32* %s", val, f)
+				}
+			}
+			e.structVars[st.name] = reg
+			e.structTypes[st.name] = st.typ
+			e.vars[st.name] = varInfo{reg: reg}
 			break
 		}
 		// channel 变量：c channel = taskm.channel() → 锁队列（i8*）
@@ -584,6 +618,19 @@ func (e *emitter) compileExpr(x *expr) (string, byte) {
 			}
 			return "0", 'i'
 		}
+		// struct 字段访问：p.a → gep + load
+		if sr, ok := e.structVars[x.method.name]; ok {
+			fields := e.structs[e.structTypes[x.method.name]]
+			for i, fn := range fields {
+				if fn == x.method.method {
+					f := e.newReg()
+					e.emitInstr("%s = getelementptr inbounds { i32, i32 }, { i32, i32 }* %s, i32 0, i32 %d", f, sr, i)
+					v := e.newReg()
+					e.emitInstr("%s = load i32, i32* %s", v, f)
+					return v, 'i'
+				}
+			}
+		}
 		// channel 变量方法：c.send(v) / c.recv()
 		if info, ok := e.vars[x.method.name]; ok {
 			cl := e.newReg()
@@ -798,6 +845,7 @@ const (
 	kList
 	kIndex
 	kMethod
+	kStructLit
 )
 
 type expr struct {
@@ -811,6 +859,7 @@ type expr struct {
 	lst    *listLit    // kList
 	idx    *indexExpr  // kIndex
 	method *methodExpr // kMethod
+	sl     *structLit  // kStructLit
 	sc     strConst    // 预注册的字符串常量（kString）
 }
 
@@ -823,6 +872,10 @@ type methodExpr struct {
 	name   string
 	method string
 	args   []*expr
+}
+
+type structLit struct {
+	values []*expr
 }
 
 type stmt interface{}
@@ -860,6 +913,11 @@ type funcDef struct {
 	params []string
 	ret    string
 	body   []stmt
+}
+
+type structDef struct {
+	name   string
+	fields []string
 }
 
 type callExpr struct {
@@ -900,10 +958,11 @@ type varInfoList struct {
 }
 
 type parser struct {
-	src   string
-	pos   int
-	funcs []*funcDef
-	stmts []stmt // main 的函数体
+	src     string
+	pos     int
+	funcs   []*funcDef
+	stmts   []stmt // main 的函数体
+	structs []structDef
 }
 
 func (p *parser) errf(format string, args ...interface{}) error {
@@ -965,8 +1024,48 @@ func (p *parser) parseProgram() error {
 		if err != nil {
 			return err
 		}
+		if name == "type" {
+			// type struct { a int; b int; } Name;
+			p.skipSpace()
+			if _, err := p.expectIdent(); err != nil {
+				return err
+			} // struct
+			p.skipSpace()
+			if err := p.expect('{'); err != nil {
+				return err
+			}
+			var fields []string
+			p.skipSpace()
+			for p.pos < len(p.src) && p.src[p.pos] != '}' {
+				fn, err := p.expectIdent()
+				if err != nil {
+					return err
+				}
+				fields = append(fields, fn)
+				p.skipSpace()
+				p.parseTypeName() // 字段类型（v1 忽略，按 i32）
+				p.skipSpace()
+				if err := p.expect(';'); err != nil {
+					return err
+				}
+				p.skipSpace()
+			}
+			p.pos++ // }
+			p.skipSpace()
+			sn, err := p.expectIdent()
+			if err != nil {
+				return err
+			}
+			p.skipSpace()
+			if err := p.expect(';'); err != nil {
+				return err
+			}
+			p.structs = append(p.structs, structDef{name: sn, fields: fields})
+			p.skipSpace()
+			continue
+		}
 		if name != "func" {
-			return p.errf("compiler v0.2 supports only func declarations, got %q", name)
+			return p.errf("compiler v0.2 supports only func/type declarations, got %q", name)
 		}
 		if err := p.parseFunc(); err != nil {
 			return err
@@ -1638,6 +1737,29 @@ func (p *parser) parsePrimary() (*expr, error) {
 			return &expr{kind: kMethod, method: me}, nil
 		}
 		return &expr{kind: kIdent, s: name}, nil
+	case c == '.':
+		// 结构体字面量：.{v1, v2, ...}
+		p.pos++
+		if err := p.expect('{'); err != nil {
+			return nil, err
+		}
+		sl := &structLit{}
+		p.skipSpace()
+		for p.pos < len(p.src) && p.src[p.pos] != '}' {
+			v, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			sl.values = append(sl.values, v)
+			p.skipSpace()
+			if p.pos < len(p.src) && p.src[p.pos] == ',' {
+				p.pos++
+				p.skipSpace()
+				continue
+			}
+		}
+		p.pos++ // }
+		return &expr{kind: kStructLit, sl: sl}, nil
 	case c == '-':
 		p.pos++
 		inner, err := p.parsePrimary()

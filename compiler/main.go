@@ -10,8 +10,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"runtime"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"quarklang/compiler/internal/cgen"

@@ -1152,6 +1152,11 @@ func (c *checker) inferBin(x *BinOp, sc *cScope) (*Type, error) {
 			return tFloatV, nil
 		}
 		return tIntV, nil
+	case "<<", ">>":
+		if l.Kind != tInt || r.Kind != tInt {
+			return nil, c.errf(x.Pos, "TypeError: 位移运算需要 int 操作数，got %s and %s", l, r)
+		}
+		return tIntV, nil
 	case "==", "!=":
 		ok := (isNumeric(l) && isNumeric(r)) || (l.Kind == tString && r.Kind == tString) ||
 			(l.Kind == tBool && r.Kind == tBool) || (l.Kind == tAny || r.Kind == tAny) ||

@@ -56,6 +56,8 @@ const (
 	TGe
 	TAnd
 	TOr
+	TShl
+	TShr
 	TLog
 	TAmper
 	TNull
@@ -71,7 +73,7 @@ var tokenNames = [...]string{
 	"'while'", "'for'", "'in'", "'true'", "'false'",
 	"'('", "')'", "'{'", "'}'", "'['", "']'", "';'", "','", "'.'", "':'", "'::'", "'@'",
 	"'='", "'+'", "'-'", "'*'", "'/'", "'%'", "'!'", "'=='", "'!='", "'<'", "'<='", "'>'", "'>='", "'&&'", "'||'",
-	"'log'", "'&'", "'null'", "'try'", "'catch'", "'#'", "'macro'",
+	"'log'", "'&'", "'<<'", "'>>'", "'null'", "'try'", "'catch'", "'#'", "'macro'",
 }
 
 func (k TokenKind) String() string {
@@ -286,12 +288,22 @@ func (lx *lexer) next() (Token, error) {
 			lx.advance()
 			return Token{Kind: TLe, Text: "<=", Line: line, Col: col}, nil
 		}
+		if lx.peekByteAt(1) == '<' {
+			lx.advance()
+			lx.advance()
+			return Token{Kind: TShl, Text: "<<", Line: line, Col: col}, nil
+		}
 		return one(TLt)
 	case '>':
 		if lx.peekByteAt(1) == '=' {
 			lx.advance()
 			lx.advance()
 			return Token{Kind: TGe, Text: ">=", Line: line, Col: col}, nil
+		}
+		if lx.peekByteAt(1) == '>' {
+			lx.advance()
+			lx.advance()
+			return Token{Kind: TShr, Text: ">>", Line: line, Col: col}, nil
 		}
 		return one(TGt)
 	case ':':

@@ -1011,8 +1011,9 @@ func (p *parser) parseAnd() (Expr, error) { return p.parseBin(p.parseCmp, TAnd) 
 func (p *parser) parseCmp() (Expr, error) {
 	return p.parseBin(p.parseAdd, TEq, TNe, TLt, TLe, TGt, TGe)
 }
-func (p *parser) parseAdd() (Expr, error) { return p.parseBin(p.parseMul, TPlus, TMinus) }
-func (p *parser) parseMul() (Expr, error) { return p.parseBin(p.parseUnary, TStar, TSlash, TPercent) }
+func (p *parser) parseAdd() (Expr, error)   { return p.parseBin(p.parseShift, TPlus, TMinus) }
+func (p *parser) parseMul() (Expr, error)   { return p.parseBin(p.parseUnary, TStar, TSlash, TPercent) }
+func (p *parser) parseShift() (Expr, error) { return p.parseBin(p.parseMul, TShl, TShr) }
 
 func (p *parser) parseBin(left func() (Expr, error), kinds ...TokenKind) (Expr, error) {
 	x, err := left()

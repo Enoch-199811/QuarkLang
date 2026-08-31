@@ -42,7 +42,7 @@ type emitter struct {
 	regCount     int
 	strs         map[string]strConst
 	strCount     int
-	funcReturned bool          // 函数已 ret（后续语句不可达，跳过生成）
+	funcReturned bool            // 函数已 ret（后续语句不可达，跳过生成）
 	assigned     map[string]bool // 被赋值变量（SSA 直通判定）
 }
 
@@ -570,7 +570,7 @@ func (e *emitter) compileExpr(x *expr) (string, byte) {
 		}
 		l, _ := e.compileExpr(x.l)
 		r, _ := e.compileExpr(x.r)
-		op := map[string]string{"+": "add", "-": "sub", "*": "mul", "/": "sdiv", "%": "srem"}[x.op]
+		op := map[string]string{"+": "add", "-": "sub", "*": "mul", "/": "sdiv", "%": "srem", "<<": "shl", ">>": "ashr"}[x.op]
 		reg := e.newReg()
 		e.emitInstr("%s = %s i32 %s, %s", reg, op, l, r)
 		return reg, 'i'
@@ -1029,6 +1029,10 @@ func constEval(x *expr) (int64, bool) {
 			if r != 0 {
 				return l % r, true
 			}
+		case "<<":
+			return int64(int32(l) << uint(r&31)), true
+		case ">>":
+			return int64(int32(l) >> uint(r&31)), true
 		}
 	}
 	return 0, false
@@ -1185,6 +1189,17 @@ func (p *parser) parseMul() (*expr, error) {
 	}
 	for {
 		p.skipSpace()
+		// 位移 << >>
+		if p.pos+1 < len(p.src) && ((p.src[p.pos] == '<' && p.src[p.pos+1] == '<') || (p.src[p.pos] == '>' && p.src[p.pos+1] == '>')) {
+			op := string(p.src[p.pos]) + string(p.src[p.pos+1])
+			p.pos += 2
+			r, err := p.parsePrimary()
+			if err != nil {
+				return nil, err
+			}
+			l = &expr{kind: kBin, op: op, l: l, r: r}
+			continue
+		}
 		if p.pos >= len(p.src) || (p.src[p.pos] != '*' && p.src[p.pos] != '/' && p.src[p.pos] != '%') {
 			return l, nil
 		}

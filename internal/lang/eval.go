@@ -1792,6 +1792,22 @@ func (in *interp) memorizeBufferCall(mb *MemorizeBuffer, prefix *StructValue, re
 	return res, nil
 }
 
+// pow2 返回 n 使得 v == 2^n（v>0 且为 2 的幂）。
+func pow2(v int32) (int, bool) {
+	if v <= 0 {
+		return 0, false
+	}
+	n := 0
+	for v > 1 {
+		if v&1 == 1 {
+			return 0, false
+		}
+		v >>= 1
+		n++
+	}
+	return n, true
+}
+
 func binOp(op string, l, r Value, pos Pos, ctx *execCtx) (Value, error) {
 	if op == "+" {
 		if _, ok := l.(StrV); ok {
@@ -1804,6 +1820,16 @@ func binOp(op string, l, r Value, pos Pos, ctx *execCtx) (Value, error) {
 	switch op {
 	case "+", "-", "*", "/", "%":
 		return arith(op, l, r, pos, ctx)
+	case "<<", ">>":
+		li, lInt := l.(IntV)
+		sh, sInt := r.(IntV)
+		if !lInt || !sInt {
+			return nil, &RunError{Msg: "TypeError: 位移运算需要 int 操作数", Pos: pos, Ctx: ctx}
+		}
+		if op == "<<" {
+			return IntV(int32(li) << uint(sh&31)), nil
+		}
+		return IntV(int32(li) >> uint(sh&31)), nil // 算术右移（符号扩展）
 	case "==", "!=", "<", "<=", ">", ">=":
 		return cmp(op, l, r, pos, ctx)
 	}
@@ -1820,6 +1846,10 @@ func arith(op string, l, r Value, pos Pos, ctx *execCtx) (Value, error) {
 		case "-":
 			return wrapI32(int64(li) - int64(ri)), nil
 		case "*":
+			// 位运算优化：乘 2^n ≡ 左移 n（int32 环绕一致，精确等价）
+			if n, ok := pow2(int32(ri)); ok {
+				return wrapI32(int64(int32(li) << uint(n))), nil
+			}
 			return wrapI32(int64(li) * int64(ri)), nil
 		case "/":
 			if ri == 0 {

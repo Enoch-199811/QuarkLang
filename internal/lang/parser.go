@@ -1,8 +1,10 @@
 package lang
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"strings"
+	"sync"
 )
 
 // ParseError reports a syntax error with source position.
@@ -29,7 +31,24 @@ func Parse(toks []Token) (*Program, error) {
 
 // Compile lexes, parses, and statically type-checks source code
 // (spec §11.1: strict checks run at compile time).
+// compileCache：进程内增量编译缓存（同源码哈希 → 已编译 Program）。
+var compileCache sync.Map // sha256(src) → *Program
+
 func Compile(src string) (*Program, error) {
+	h := sha256.Sum256([]byte(src))
+	key := string(h[:])
+	if p, ok := compileCache.Load(key); ok {
+		return p.(*Program), nil
+	}
+	prog, err := compileSlow(src)
+	if err != nil {
+		return nil, err
+	}
+	compileCache.Store(key, prog)
+	return prog, nil
+}
+
+func compileSlow(src string) (*Program, error) {
 	toks, err := Lex(src)
 	if err != nil {
 		return nil, err
@@ -226,8 +245,16 @@ func (p *parser) parseProgram() (*Program, error) {
 					if err != nil {
 						return nil, err
 					}
+<<<<<<< Updated upstream
 					if kind.Text != "main" && kind.Text != "library" {
 						return nil, p.errf(kind, "program 只支持 main 或 library，got %q", kind.Text)
+=======
+					if kind.Text != "main" && kind.Text != "library" && kind.Text != "lib" {
+						return nil, p.errf(kind, "program 声明只支持 main / library（lib）")
+					}
+					if kind.Text == "lib" {
+						kind.Text = "library"
+>>>>>>> Stashed changes
 					}
 					if _, err := p.expect(TSemi, "';'"); err != nil {
 						return nil, err

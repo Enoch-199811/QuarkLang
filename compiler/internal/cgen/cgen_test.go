@@ -203,3 +203,37 @@ func TestVariablesAndControlFlow(t *testing.T) {
 		t.Fatalf("got %q want %q\nIR:\n%s", out, want, ir)
 	}
 }
+
+// 多函数 + 递归调用（lli 全链路：编译路径性能对标 C）
+func TestFunctionCallAndRecursion(t *testing.T) {
+	lli, err := exec.LookPath("lli")
+	if err != nil {
+		t.Skip("lli not available")
+	}
+	src := `func fib(n int) int {
+    if (n < 2) {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+func main(io IOStream) {
+    io.println(fib(10));
+}`
+	ir, err := Transpile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, _ := os.CreateTemp("", "quark-fib-*.ll")
+	f.WriteString(ir)
+	name := f.Name()
+	f.Close()
+	defer os.Remove(name)
+	out, err := exec.Command(lli, name).CombinedOutput()
+	if err != nil {
+		t.Fatalf("lli: %v\nIR:\n%s", err, ir)
+	}
+	if string(out) != "55\n" {
+		t.Fatalf("got %q", out)
+	}
+}

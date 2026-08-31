@@ -15,7 +15,7 @@ func Transpile(src string) (string, error) {
 		return "", err
 	}
 	e := &emitter{}
-	return e.emitProgram(p.stmts), nil
+	return e.emitProgram(p.funcs, p.stmts), nil
 }
 
 // ---------- LLVM IR 发射器 ----------
@@ -28,17 +28,19 @@ type strConst struct {
 type varInfo struct {
 	reg   string
 	isStr bool
+	param bool // 函数参数：值寄存器，直接使用不 load
 }
 
 type emitter struct {
-	b          strings.Builder // 模块头（printf 声明 + 字符串常量）
-	body       strings.Builder // 函数体（基本块 + 指令）
-	cur        string          // 当前基本块名
-	blockCount int
-	vars       map[string]varInfo
-	regCount   int
-	strs       map[string]strConst
-	strCount   int
+	b            strings.Builder // 模块头（printf 声明 + 字符串常量）
+	body         strings.Builder // 函数体（基本块 + 指令）
+	cur          string          // 当前基本块名
+	blockCount   int
+	vars         map[string]varInfo
+	regCount     int
+	strs         map[string]strConst
+	strCount     int
+	funcReturned bool // 函数已 ret（后续语句不可达，跳过生成）
 }
 
 func (e *emitter) emitInstr(f string, args ...interface{}) {
@@ -99,21 +101,62 @@ func llvmEscape(b []byte) string {
 	return sb.String()
 }
 
-func (e *emitter) emitProgram(stmts []stmt) string {
+func (e *emitter) emitProgram(funcs []*funcDef, mainStmts []stmt) string {
 	e.b.WriteString("declare i32 @printf(i8* noundef, ...)\n\n")
 	e.vars = map[string]varInfo{}
-	// 预注册全部字符串常量（含 println 格式串与 true/false 字面量）
+	// 预注册全部字符串常量
 	e.strConst("true")
 	e.strConst("false")
-	for _, s := range stmts {
+	for _, fd := range funcs {
+		for _, s := range fd.body {
+			e.preRegisterStmt(s)
+		}
+	}
+	for _, s := range mainStmts {
 		e.preRegisterStmt(s)
 	}
+	// 先生成全部函数体（期间动态字符串常量追加到 e.b），最后统一组装：常量全部先于函数
+	var bodies strings.Builder
+	for _, fd := range funcs {
+		if fd.name != "main" {
+			bodies.WriteString(e.emitFunc(fd))
+		}
+	}
+	e.cur = "entry"
+	e.body.Reset()
+	e.funcReturned = false
+	e.body.WriteString("entry:\n")
+	e.emitBlock(mainStmts)
+	e.emitInstr("ret i32 0")
+	bodies.WriteString("define i32 @main() {\n" + e.body.String() + "}\n")
+	return e.b.String() + bodies.String()
+}
+
+// emitFunc 生成单个非 main 函数的定义。
+func (e *emitter) emitFunc(fd *funcDef) string {
+	e.regCount = 0
+	e.blockCount = 0
+	e.body.Reset()
+	e.vars = map[string]varInfo{}
+	var sig strings.Builder
+	sig.WriteString("define i32 @" + fd.name + "(")
+	for i, p := range fd.params {
+		if i > 0 {
+			sig.WriteString(", ")
+		}
+		reg := fmt.Sprintf("%%p%d", i)
+		sig.WriteString("i32 " + reg)
+		e.vars[p] = varInfo{reg: reg, param: true}
+	}
+	sig.WriteString(")\n")
 	e.cur = "entry"
 	e.body.WriteString("entry:\n")
-	e.emitBlock(stmts)
-	e.emitInstr("ret i32 0")
-	// 组装：声明与常量全部先于函数体
-	return e.b.String() + "define i32 @main() {\n" + e.body.String() + "}\n"
+	e.funcReturned = false
+	e.emitBlock(fd.body)
+	if !e.funcReturned {
+		e.emitInstr("ret i32 0")
+	}
+	return sig.String() + "{\n" + e.body.String() + "}\n"
 }
 
 func (e *emitter) preRegisterStmt(s stmt) {
@@ -155,12 +198,19 @@ func (e *emitter) preRegister(x *expr) {
 
 func (e *emitter) emitBlock(stmts []stmt) {
 	for _, s := range stmts {
+		if e.funcReturned {
+			return // ret 之后的语句不可达，跳过
+		}
 		e.emitStmt(s)
 	}
 }
 
 func (e *emitter) emitStmt(s stmt) {
 	switch st := s.(type) {
+	case *returnStmt:
+		v, _ := e.compileExpr(st.x)
+		e.emitInstr("ret i32 %s", v)
+		e.funcReturned = true
 	case *printlnStmt:
 		e.emitPrintln(st)
 	case *declStmt:
@@ -202,14 +252,24 @@ func (e *emitter) emitStmt(s stmt) {
 		} else {
 			e.emitInstr("br i1 %s, label %%%s, label %%%s", c, thenB, endB)
 		}
+		saved := e.funcReturned
 		e.setBlock(thenB)
 		e.emitBlock(st.then)
-		e.emitInstr("br label %%%s", endB)
+		thenRet := e.funcReturned
+		e.funcReturned = saved
+		if !thenRet {
+			e.emitInstr("br label %%%s", endB)
+		}
 		if elseB != "" {
 			e.setBlock(elseB)
 			e.emitBlock(st.els)
-			e.emitInstr("br label %%%s", endB)
+			elseRet := e.funcReturned
+			e.funcReturned = saved
+			if !elseRet {
+				e.emitInstr("br label %%%s", endB)
+			}
 		}
+		e.funcReturned = saved
 		e.setBlock(endB)
 	case *whileStmt:
 		condB, bodyB, endB := e.newBlock(), e.newBlock(), e.newBlock()
@@ -217,9 +277,15 @@ func (e *emitter) emitStmt(s stmt) {
 		e.setBlock(condB)
 		c := e.compileCond(st.cond)
 		e.emitInstr("br i1 %s, label %%%s, label %%%s", c, bodyB, endB)
+		saved := e.funcReturned
 		e.setBlock(bodyB)
 		e.emitBlock(st.body)
-		e.emitInstr("br label %%%s", condB)
+		bodyRet := e.funcReturned
+		e.funcReturned = saved
+		if !bodyRet {
+			e.emitInstr("br label %%%s", condB)
+		}
+		e.funcReturned = saved
 		e.setBlock(endB)
 	}
 }
@@ -324,6 +390,9 @@ func (e *emitter) compileExpr(x *expr) (string, byte) {
 		if !ok {
 			return x.s, 'i' // 未声明变量：让生成的 IR 报错（llvm-as 校验会拦截）
 		}
+		if info.param {
+			return info.reg, 'i' // 函数参数是值寄存器，直接使用
+		}
 		reg := e.newReg()
 		if info.isStr {
 			e.emitInstr("%s = load i8*, i8** %s", reg, info.reg)
@@ -334,6 +403,20 @@ func (e *emitter) compileExpr(x *expr) (string, byte) {
 	case kCmp, kAndOr:
 		c := e.compileCond(x)
 		return c, 'b'
+	case kCall:
+		// 函数调用：call i32 @name(i32 %a, ...)
+		argRegs := make([]string, 0, len(x.call.args))
+		for _, a := range x.call.args {
+			v, _ := e.compileExpr(a)
+			argRegs = append(argRegs, v)
+		}
+		line := "  " + e.newReg() + " = call i32 @" + x.call.name
+		if len(argRegs) > 0 {
+			line += "(i32 " + strings.Join(argRegs, ", i32 ") + ")"
+		}
+		line += "\n"
+		e.body.WriteString(line)
+		return strings.Fields(line)[0], 'i' // 返回 %N（call 结果寄存器）
 	case kBin:
 		l, _ := e.compileExpr(x.l)
 		r, _ := e.compileExpr(x.r)
@@ -357,6 +440,7 @@ const (
 	kBool
 	kCmp
 	kAndOr
+	kCall
 )
 
 type expr struct {
@@ -366,7 +450,8 @@ type expr struct {
 	s    string
 	op   string
 	l, r *expr
-	sc   strConst // 预注册的字符串常量（kString）
+	call *callExpr // kCall
+	sc   strConst  // 预注册的字符串常量（kString）
 }
 
 type stmt interface{}
@@ -399,10 +484,27 @@ type whileStmt struct {
 
 // ---------- 递归下降解析器 ----------
 
+type funcDef struct {
+	name   string
+	params []string
+	ret    string
+	body   []stmt
+}
+
+type callExpr struct {
+	name string
+	args []*expr
+}
+
+type returnStmt struct {
+	x *expr
+}
+
 type parser struct {
 	src   string
 	pos   int
-	stmts []stmt
+	funcs []*funcDef
+	stmts []stmt // main 的函数体
 }
 
 func (p *parser) errf(format string, args ...interface{}) error {
@@ -475,30 +577,46 @@ func (p *parser) parseProgram() error {
 	return nil
 }
 
+// parseFunc 解析多函数声明：func name(p1 T1, ...) [ret] { body }。
 func (p *parser) parseFunc() error {
 	p.skipSpace()
 	name, err := p.expectIdent()
 	if err != nil {
 		return err
 	}
+	fd := &funcDef{name: name}
 	p.skipSpace()
-	if err := p.expect('('); err != nil {
-		return err
-	}
-	depth := 1
-	for depth > 0 && p.pos < len(p.src) {
-		if p.src[p.pos] == '(' {
-			depth++
-		}
-		if p.src[p.pos] == ')' {
-			depth--
-		}
+	if p.pos < len(p.src) && p.src[p.pos] == '(' {
 		p.pos++
-	}
-	if name != "main" {
-		return p.errf("compiler v0.2 supports only func main, got func %s", name)
+		for {
+			p.skipSpace()
+			if p.pos < len(p.src) && p.src[p.pos] == ')' {
+				p.pos++
+				break
+			}
+			pn, err := p.expectIdent()
+			if err != nil {
+				return err
+			}
+			fd.params = append(fd.params, pn)
+			p.skipSpace()
+			// 参数类型（int/String/...，编译器 v0.2 只支持 int 语义）
+			if p.pos < len(p.src) && p.isIdentStart(p.src[p.pos]) {
+				p.lexIdent()
+			}
+			p.skipSpace()
+			if p.pos < len(p.src) && p.src[p.pos] == ',' {
+				p.pos++
+				continue
+			}
+		}
 	}
 	p.skipSpace()
+	// 返回类型（'{' 前的标识符；main 无返回类型 = void）
+	if p.pos < len(p.src) && p.isIdentStart(p.src[p.pos]) {
+		fd.ret = p.lexIdent()
+		p.skipSpace()
+	}
 	if err := p.expect('{'); err != nil {
 		return err
 	}
@@ -506,7 +624,11 @@ func (p *parser) parseFunc() error {
 	if err != nil {
 		return err
 	}
-	p.stmts = append(p.stmts, stmts...)
+	fd.body = stmts
+	p.funcs = append(p.funcs, fd)
+	if name == "main" {
+		p.stmts = stmts
+	}
 	return nil
 }
 
@@ -528,6 +650,16 @@ func (p *parser) parseBlock() ([]stmt, error) {
 		}
 		p.skipSpace()
 		switch first {
+		case "return":
+			x, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			p.skipSpace()
+			if err := p.expect(';'); err != nil {
+				return nil, err
+			}
+			stmts = append(stmts, &returnStmt{x: x})
 		case "io":
 			if err := p.expect('.'); err != nil {
 				return nil, err
@@ -847,6 +979,32 @@ func (p *parser) parsePrimary() (*expr, error) {
 		if name == "false" {
 			return &expr{kind: kBool, b: false}, nil
 		}
+		// 函数调用：name(args)
+		save := p.pos
+		p.skipSpace()
+		if p.pos < len(p.src) && p.src[p.pos] == '(' {
+			p.pos++
+			call := &callExpr{name: name}
+			for {
+				p.skipSpace()
+				if p.pos < len(p.src) && p.src[p.pos] == ')' {
+					p.pos++
+					break
+				}
+				a, err := p.parseExpr()
+				if err != nil {
+					return nil, err
+				}
+				call.args = append(call.args, a)
+				p.skipSpace()
+				if p.pos < len(p.src) && p.src[p.pos] == ',' {
+					p.pos++
+					continue
+				}
+			}
+			return &expr{kind: kCall, call: call}, nil
+		}
+		p.pos = save
 		return &expr{kind: kIdent, s: name}, nil
 	case c == '-':
 		p.pos++

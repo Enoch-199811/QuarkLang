@@ -226,8 +226,11 @@ func (p *parser) parseProgram() (*Program, error) {
 					if err != nil {
 						return nil, err
 					}
-					if kind.Text != "main" && kind.Text != "library" {
-						return nil, p.errf(kind, "program 只支持 main 或 library，got %q", kind.Text)
+					if kind.Text != "main" && kind.Text != "library" && kind.Text != "lib" {
+						return nil, p.errf(kind, "program 声明只支持 main / library（lib）", kind.Text)
+					}
+					if kind.Text == "lib" {
+						kind.Text = "library"
 					}
 					if _, err := p.expect(TSemi, "';'"); err != nil {
 						return nil, err

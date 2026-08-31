@@ -550,6 +550,10 @@ func (e *emitter) compileExpr(x *expr) (string, byte) {
 		e.body.WriteString(line)
 		return strings.Fields(line)[0], 'i' // 返回 %N（call 结果寄存器）
 	case kBin:
+		// 简单优化：递归常量折叠（1 + 2*3 → 7 编译期算掉，IR 更小编译更快）
+		if v, ok := constEval(x); ok {
+			return fmt.Sprintf("%d", int32(v)), 'i'
+		}
 		l, _ := e.compileExpr(x.l)
 		r, _ := e.compileExpr(x.r)
 		op := map[string]string{"+": "add", "-": "sub", "*": "mul", "/": "sdiv", "%": "srem"}[x.op]
@@ -579,17 +583,17 @@ const (
 )
 
 type expr struct {
-	kind exprKind
-	i    int64
-	b    bool
-	s    string
-	op   string
-	l, r *expr
-	call *callExpr  // kCall
-	lst  *listLit   // kList
+	kind   exprKind
+	i      int64
+	b      bool
+	s      string
+	op     string
+	l, r   *expr
+	call   *callExpr   // kCall
+	lst    *listLit    // kList
 	idx    *indexExpr  // kIndex
 	method *methodExpr // kMethod
-	sc     strConst   // 预注册的字符串常量（kString）
+	sc     strConst    // 预注册的字符串常量（kString）
 }
 
 type indexExpr struct {
@@ -980,6 +984,40 @@ func (p *parser) parseBlock() ([]stmt, error) {
 			}
 		}
 	}
+}
+
+// constEval 递归求值常量表达式（字面量算术折叠）。
+func constEval(x *expr) (int64, bool) {
+	if x == nil {
+		return 0, false
+	}
+	if x.kind == kInt {
+		return x.i, true
+	}
+	if x.kind == kBin {
+		l, ok1 := constEval(x.l)
+		r, ok2 := constEval(x.r)
+		if !ok1 || !ok2 {
+			return 0, false
+		}
+		switch x.op {
+		case "+":
+			return l + r, true
+		case "-":
+			return l - r, true
+		case "*":
+			return l * r, true
+		case "/":
+			if r != 0 {
+				return l / r, true
+			}
+		case "%":
+			if r != 0 {
+				return l % r, true
+			}
+		}
+	}
+	return 0, false
 }
 
 // parseTypeName 解析类型注解：int / String / List<int>（编译器支持的子集）。

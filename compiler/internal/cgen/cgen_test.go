@@ -31,11 +31,12 @@ func TestArithmeticIR(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(ir, "mul i32 2, 3") {
-		t.Fatalf("missing mul:\n%s", ir)
+	// 常量折叠：1 + 2 * 3 → 7（编译期算掉，IR 无算术指令）
+	if strings.Contains(ir, "mul i32") || strings.Contains(ir, "add i32") {
+		t.Fatalf("constant folding failed:\n%s", ir)
 	}
-	if !strings.Contains(ir, "add i32 1, %") {
-		t.Fatalf("missing add:\n%s", ir)
+	if !strings.Contains(ir, "@.str1") {
+		t.Fatalf("missing format string:\n%s", ir)
 	}
 }
 

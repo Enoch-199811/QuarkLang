@@ -189,7 +189,7 @@ func (m *MemoryManager) BlockCount() int {
 	return len(m.blocks)
 }
 
-// Delete 把 block 标记为空（占用度归零），重新进入最小占用堆供线性复用。
+// Delete 把 block 加入空闲队列（占用度归零，数据保留），供线性复用；clear 才真正清空。
 func (m *MemoryManager) Delete(id int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -200,12 +200,19 @@ func (m *MemoryManager) Delete(id int) {
 	}
 }
 
-// Clear 直接清理整个内存（清空全部 block）。
+// Clear 真正清空空闲（Used==0）block 的数据，保障数据安全；使用中的 block 保留。
 func (m *MemoryManager) Clear() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.blocks = map[int]*MemBlock{}
+	for id, b := range m.blocks {
+		if b.Used == 0 {
+			delete(m.blocks, id)
+		}
+	}
 	m.minHeap = nil
+	for _, b := range m.blocks {
+		heap.Push(&m.minHeap, b)
+	}
 }
 
 // StructDef is a registered struct declaration.

@@ -26,9 +26,10 @@ type strConst struct {
 }
 
 type varInfo struct {
-	reg   string
-	isStr bool
-	param bool // 函数参数：值寄存器，直接使用不 load
+	reg    string
+	isStr  bool
+	isList bool
+	param  bool // 函数参数：值寄存器，直接使用不 load
 }
 
 type emitter struct {
@@ -102,7 +103,9 @@ func llvmEscape(b []byte) string {
 }
 
 func (e *emitter) emitProgram(funcs []*funcDef, mainStmts []stmt) string {
-	e.b.WriteString("declare i32 @printf(i8* noundef, ...)\n\n")
+	e.b.WriteString("declare i32 @printf(i8* noundef, ...)\n")
+	e.b.WriteString("declare i8* @malloc(i64)\n")
+	e.b.WriteString("declare void @free(i8*)\n\n")
 	e.vars = map[string]varInfo{}
 	// 预注册全部字符串常量
 	e.strConst("true")
@@ -214,6 +217,27 @@ func (e *emitter) emitStmt(s stmt) {
 	case *printlnStmt:
 		e.emitPrintln(st)
 	case *declStmt:
+		if st.typ == "List<int>" {
+			// List<int> = [a, b, c]：malloc 3*i32 并写入（delete 时 free）
+			lit := st.init.lst
+			n := len(lit.items)
+			mc := e.newReg()
+			e.emitInstr("%s = call i8* @malloc(i64 %d)", mc, n*4)
+			p := e.newReg()
+			e.emitInstr("%s = bitcast i8* %s to i32*", p, mc)
+			for i, it := range lit.items {
+				v, _ := e.compileExpr(it)
+				if i == 0 {
+					e.emitInstr("store i32 %s, i32* %s", v, p)
+				} else {
+					g2 := e.newReg()
+					e.emitInstr("%s = getelementptr inbounds i32, i32* %s, i64 %d", g2, p, i)
+					e.emitInstr("store i32 %s, i32* %s", v, g2)
+				}
+			}
+			e.vars[st.name] = varInfo{reg: p, isList: true}
+			break
+		}
 		// 先分配再求值：保证 SSA 寄存器编号单调递增
 		reg := e.newReg()
 		if st.typ == "String" {
@@ -227,6 +251,15 @@ func (e *emitter) emitStmt(s stmt) {
 			e.emitInstr("store i32 %s, i32* %s", v, reg)
 			e.vars[st.name] = varInfo{reg: reg}
 		}
+	case *deleteStmt:
+		// delete variable; —— 编译路径 = free（空闲队列语义由运行时内存管理器承担）
+		info, ok := e.vars[st.name]
+		if !ok {
+			break
+		}
+		c := e.newReg()
+		e.emitInstr("%s = bitcast i32* %s to i8*", c, info.reg)
+		e.emitInstr("call void @free(i8* %s)", c)
 	case *assignStmt:
 		info, ok := e.vars[st.name]
 		if !ok {
@@ -403,6 +436,18 @@ func (e *emitter) compileExpr(x *expr) (string, byte) {
 	case kCmp, kAndOr:
 		c := e.compileCond(x)
 		return c, 'b'
+	case kIndex:
+		// list[i]：getelementptr + load（List<int> 编译为 i32*）
+		info, ok := e.vars[x.idx.name]
+		if !ok {
+			return "0", 'i'
+		}
+		i, _ := e.compileExpr(x.idx.i)
+		g2 := e.newReg()
+		e.emitInstr("%s = getelementptr inbounds i32, i32* %s, i64 %s", g2, info.reg, i)
+		v := e.newReg()
+		e.emitInstr("%s = load i32, i32* %s", v, g2)
+		return v, 'i'
 	case kCall:
 		// 函数调用：call i32 @name(i32 %a, ...)
 		argRegs := make([]string, 0, len(x.call.args))
@@ -441,6 +486,8 @@ const (
 	kCmp
 	kAndOr
 	kCall
+	kList
+	kIndex
 )
 
 type expr struct {
@@ -451,7 +498,14 @@ type expr struct {
 	op   string
 	l, r *expr
 	call *callExpr // kCall
+	lst  *listLit  // kList
+	idx  *indexExpr // kIndex
 	sc   strConst  // 预注册的字符串常量（kString）
+}
+
+type indexExpr struct {
+	name string
+	i    *expr
 }
 
 type stmt interface{}
@@ -498,6 +552,19 @@ type callExpr struct {
 
 type returnStmt struct {
 	x *expr
+}
+
+type listLit struct {
+	items []*expr
+}
+
+type deleteStmt struct {
+	name string
+}
+
+type varInfoList struct {
+	reg    string
+	isList bool
 }
 
 type parser struct {
@@ -650,6 +717,18 @@ func (p *parser) parseBlock() ([]stmt, error) {
 		}
 		p.skipSpace()
 		switch first {
+		case "delete":
+			// delete variable; —— 加入空闲队列（编译路径 = free）
+			p.skipSpace()
+			target, err := p.expectIdent()
+			if err != nil {
+				return nil, err
+			}
+			p.skipSpace()
+			if err := p.expect(';'); err != nil {
+				return nil, err
+			}
+			stmts = append(stmts, &deleteStmt{name: target})
 		case "return":
 			x, err := p.parseExpr()
 			if err != nil {
@@ -771,7 +850,7 @@ func (p *parser) parseBlock() ([]stmt, error) {
 				}
 				stmts = append(stmts, &assignStmt{name: first, x: x})
 			} else if p.pos < len(p.src) && p.isIdentStart(p.src[p.pos]) {
-				typ := p.lexIdent()
+				typ := p.parseTypeName()
 				p.skipSpace()
 				if err := p.expect('='); err != nil {
 					return nil, p.errf("expected '=' in declaration of %q", first)
@@ -791,6 +870,22 @@ func (p *parser) parseBlock() ([]stmt, error) {
 			}
 		}
 	}
+}
+
+// parseTypeName 解析类型注解：int / String / List<int>（编译器支持的子集）。
+func (p *parser) parseTypeName() string {
+	t := p.lexIdent()
+	if t == "List" && p.pos < len(p.src) && p.src[p.pos] == '<' {
+		p.pos++
+		for p.pos < len(p.src) && p.src[p.pos] != '>' {
+			p.pos++
+		}
+		if p.pos < len(p.src) {
+			p.pos++
+		}
+		return "List<int>"
+	}
+	return t
 }
 
 func (p *parser) parseExpr() (*expr, error) {
@@ -1005,6 +1100,20 @@ func (p *parser) parsePrimary() (*expr, error) {
 			return &expr{kind: kCall, call: call}, nil
 		}
 		p.pos = save
+		// 下标访问：name[expr]
+		p.skipSpace()
+		if p.pos < len(p.src) && p.src[p.pos] == '[' {
+			p.pos++
+			ie, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			p.skipSpace()
+			if err := p.expect(']'); err != nil {
+				return nil, err
+			}
+			return &expr{kind: kIndex, idx: &indexExpr{name: name, i: ie}}, nil
+		}
 		return &expr{kind: kIdent, s: name}, nil
 	case c == '-':
 		p.pos++
@@ -1031,6 +1140,49 @@ func (p *parser) parsePrimary() (*expr, error) {
 			return nil, err
 		}
 		return e, nil
+	case c == '[':
+		p.pos++
+		lit := &listLit{}
+		for {
+			p.skipSpace()
+			if p.pos < len(p.src) && p.src[p.pos] == ']' {
+				p.pos++
+				break
+			}
+			it, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			lit.items = append(lit.items, it)
+			p.skipSpace()
+			if p.pos < len(p.src) && p.src[p.pos] == ',' {
+				p.pos++
+				continue
+			}
+		}
+		return &expr{kind: kList, lst: lit}, nil
+	case c == '[':
+		// 列表字面量 [a, b, c]
+		p.pos++
+		lit := &listLit{}
+		for {
+			p.skipSpace()
+			if p.pos < len(p.src) && p.src[p.pos] == ']' {
+				p.pos++
+				break
+			}
+			it, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			lit.items = append(lit.items, it)
+			p.skipSpace()
+			if p.pos < len(p.src) && p.src[p.pos] == ',' {
+				p.pos++
+				continue
+			}
+		}
+		return &expr{kind: kList, lst: lit}, nil
 	}
 	return nil, p.errf("unexpected character %q in expression", string(c))
 }

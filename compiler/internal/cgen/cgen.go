@@ -47,6 +47,7 @@ type emitter struct {
 	assigned     map[string]bool // 被赋值变量（SSA 直通判定）
 	runners      []string        // taskm.merge 的 runner 函数名（fn@N）
 	runnerFn     map[string]string
+	curTry       string // 当前 try 的 catch label（错误检查跳转）
 }
 
 func (e *emitter) emitInstr(f string, args ...interface{}) {
@@ -129,7 +130,8 @@ func (e *emitter) emitProgram(funcs []*funcDef, mainStmts []stmt) string {
 	e.b.WriteString("declare i8* @ql_spawn()\n")
 	e.b.WriteString("declare void @ql_merge(i8*, i8*, i32)\n")
 	e.b.WriteString("declare void @ql_block(i8*)\n")
-	e.b.WriteString("declare i32 @ql_done(i8*)\n\n")
+	e.b.WriteString("declare i32 @ql_done(i8*)\n")
+	e.b.WriteString("declare i8* @ql_strcat(i8*, i8*)\n\n")
 	e.vars = map[string]varInfo{}
 	// 预注册全部字符串常量
 	e.strConst("true")
@@ -194,6 +196,13 @@ func (e *emitter) emitFunc(fd *funcDef) string {
 
 func (e *emitter) preRegisterStmt(s stmt) {
 	switch st := s.(type) {
+	case *tryStmt:
+		for _, x := range st.then {
+			e.preRegisterStmt(x)
+		}
+		for _, x := range st.catch {
+			e.preRegisterStmt(x)
+		}
 	case *printlnStmt:
 		for _, a := range st.args {
 			e.preRegister(a)
@@ -319,6 +328,26 @@ func (e *emitter) emitStmt(s stmt) {
 			e.emitInstr("store i32 %s, i32* %s", v, reg)
 			e.vars[st.name] = varInfo{reg: reg}
 		}
+	case *tryStmt:
+		oldTry := e.curTry
+		catchL := e.newBlock()
+		afterL := e.newBlock()
+		e.curTry = catchL
+		for _, s := range st.then {
+			e.emitStmt(s)
+		}
+		if !e.funcReturned {
+			e.emitInstr("br label %%%s", afterL) // 正常路径跳过 catch
+		}
+		e.curTry = oldTry
+		e.setBlock(catchL)
+		for _, s := range st.catch {
+			e.emitStmt(s)
+		}
+		if !e.funcReturned {
+			e.emitInstr("br label %%%s", afterL)
+		}
+		e.setBlock(afterL)
 	case *indexAssignStmt:
 		// l[i] = v：取 ptr 字段 + gep + store
 		if info, ok := e.vars[st.name]; ok {
@@ -721,12 +750,30 @@ func (e *emitter) compileExpr(x *expr) (string, byte) {
 		e.body.WriteString(line)
 		return strings.Fields(line)[0], 'i' // 返回 %N（call 结果寄存器）
 	case kBin:
+		// String 拼接："a" + "b" → ql_strcat（运行时）
+		if x.op == "+" && (x.l.kind == kString || x.r.kind == kString || x.l.kind == kIdent && e.vars[x.l.s].isStr || x.r.kind == kIdent && e.vars[x.r.s].isStr) {
+			lv, lt := e.compileExpr(x.l)
+			rv, rt := e.compileExpr(x.r)
+			if lt == 's' && rt == 's' {
+				rc := e.newReg()
+				e.emitInstr("%s = call i8* @ql_strcat(i8* %s, i8* %s)", rc, lv, rv)
+				return rc, 's'
+			}
+		}
 		// 简单优化：递归常量折叠（1 + 2*3 → 7 编译期算掉，IR 更小编译更快）
 		if v, ok := constEval(x); ok {
 			return fmt.Sprintf("%d", int32(v)), 'i'
 		}
 		l, _ := e.compileExpr(x.l)
 		r, _ := e.compileExpr(x.r)
+		// try/catch：除零检查跳 catch
+		if (x.op == "/" || x.op == "%") && e.curTry != "" {
+			cz := e.newReg()
+			e.emitInstr("%s = icmp eq i32 %s, 0", cz, r)
+			okL := e.newBlock()
+			e.emitInstr("br i1 %s, label %%%s, label %%%s", cz, e.curTry, okL)
+			e.setBlock(okL)
+		}
 		op := map[string]string{"+": "add", "-": "sub", "*": "mul", "/": "sdiv", "%": "srem", "<<": "shl", ">>": "ashr"}[x.op]
 		reg := e.newReg()
 		e.emitInstr("%s = %s i32 %s, %s", reg, op, l, r)
@@ -840,6 +887,11 @@ type indexAssignStmt struct {
 	name string
 	idx  *expr
 	x    *expr
+}
+
+type tryStmt struct {
+	then  []stmt
+	catch []stmt
 }
 
 type varInfoList struct {
@@ -998,8 +1050,46 @@ func (p *parser) parseBlock() ([]stmt, error) {
 		}
 		p.skipSpace()
 		switch first {
-		case "delete":
-			// delete variable; —— 加入空闲队列（编译路径 = free）
+		case "try":
+			p.skipSpace()
+			if err := p.expect('{'); err != nil {
+				return nil, err
+			}
+			then, err := p.parseBlock()
+			if err != nil {
+				return nil, err
+			}
+			p.skipSpace()
+			var catch []stmt
+			if p.pos+5 < len(p.src) && p.src[p.pos:p.pos+5] == "catch" {
+				p.pos += 5
+				p.skipSpace()
+				if p.pos < len(p.src) && p.src[p.pos] == '(' {
+					p.pos++
+					if _, err := p.expectIdent(); err != nil {
+						return nil, err
+					}
+					p.skipSpace()
+					if _, err := p.expectIdent(); err != nil {
+						return nil, err
+					}
+					p.skipSpace()
+					if err := p.expect(')'); err != nil {
+						return nil, err
+					}
+				}
+				p.skipSpace()
+				if err := p.expect('{'); err != nil {
+					return nil, err
+				}
+				catch, err = p.parseBlock()
+				if err != nil {
+					return nil, err
+				}
+			}
+			stmts = append(stmts, &tryStmt{then: then, catch: catch})
+		case "delete", "clear", "compact":
+			// delete/clear/compact variable; —— 编译路径 = free（空闲队列语义由解释器内存管理器承担）
 			p.skipSpace()
 			target, err := p.expectIdent()
 			if err != nil {

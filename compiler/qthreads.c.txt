@@ -52,3 +52,11 @@ void ql_block(ql_task* t) {
 int ql_done(ql_task* t) {
     pthread_mutex_lock(&t->mu); int d = t->done; pthread_mutex_unlock(&t->mu); return d;
 }
+
+/* 字符串拼接：malloc + 拷贝（String 变量 + 运算符） */
+char* ql_strcat(const char* a, const char* b) {
+    size_t la = strlen(a), lb = strlen(b);
+    char* r = malloc(la + lb + 1);
+    memcpy(r, a, la); memcpy(r + la, b, lb); r[la + lb] = 0;
+    return r;
+}

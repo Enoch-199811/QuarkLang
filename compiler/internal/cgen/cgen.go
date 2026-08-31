@@ -779,11 +779,15 @@ func (e *emitter) compileExpr(x *expr) (string, byte) {
 			e.emitInstr("%s = getelementptr inbounds { i32*, i32 }, { i32*, i32 }* %s, i32 0, i32 1", lf, info.reg)
 			l1 := e.newReg()
 			e.emitInstr("%s = load i32, i32* %s", l1, lf)
-			// realloc(lp, (l1+1)*4)
+			// realloc(lp, max(len*2, 1)*4) —— 几何增长（amortized O(1)，避免 O(n²) 逐项拷贝）
 			n1 := e.newReg()
-			e.emitInstr("%s = add i32 %s, 1", n1, l1)
+			e.emitInstr("%s = shl i32 %s, 1", n1, l1) // len*2
+			n1b := e.newReg()
+			e.emitInstr("%s = icmp slt i32 %s, 1", n1b, n1)
+			n1c := e.newReg()
+			e.emitInstr("%s = select i1 %s, i32 1, i32 %s", n1c, n1b, n1)
 			n64 := e.newReg()
-			e.emitInstr("%s = sext i32 %s to i64", n64, n1)
+			e.emitInstr("%s = sext i32 %s to i64", n64, n1c)
 			sz := e.newReg()
 			e.emitInstr("%s = mul i64 %s, 4", sz, n64)
 			bc := e.newReg()

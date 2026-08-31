@@ -123,8 +123,13 @@ func (e *emitter) emitProgram(funcs []*funcDef, mainStmts []stmt) string {
 	e.b.WriteString("declare void @free(i8*)\n")
 	e.b.WriteString("declare i8* @realloc(i8*, i64)\n")
 	e.b.WriteString("declare i32 @gettimeofday({ i64, i64 }*, i8*)\n")
-	e.b.WriteString("declare i32 @pthread_create(i64*, i8*, i8*, i8*)\n")
-	e.b.WriteString("declare i32 @pthread_join(i64, i8**)\n\n")
+	e.b.WriteString("declare i8* @ql_channel_new(i32)\n")
+	e.b.WriteString("declare i32 @ql_send(i8*, i32)\n")
+	e.b.WriteString("declare i32 @ql_recv(i8*)\n")
+	e.b.WriteString("declare i8* @ql_spawn()\n")
+	e.b.WriteString("declare void @ql_merge(i8*, i8*, i32)\n")
+	e.b.WriteString("declare void @ql_block(i8*)\n")
+	e.b.WriteString("declare i32 @ql_done(i8*)\n\n")
 	e.vars = map[string]varInfo{}
 	// 预注册全部字符串常量
 	e.strConst("true")
@@ -275,13 +280,24 @@ func (e *emitter) emitStmt(s stmt) {
 			e.vars[st.name] = varInfo{reg: reg, isList: true}
 			break
 		}
-		// thread 变量：t thread = taskm.spawn() → i64 tid 槽 + pthread_create
+		// thread 变量：t thread = taskm.spawn() → 用户态任务对象（i8*，由运行时线程池承载）
 		if st.typ == "thread" {
 			reg := e.newReg()
-			e.emitInstr("%s = alloca i64, align 8", reg)
+			e.emitInstr("%s = alloca i8*, align 8", reg)
 			rc := e.newReg()
-			e.emitInstr("%s = call i32 @pthread_create(i64* %s, i8* null, i8* bitcast (i8* (i8*)* @idle_runner to i8*), i8* null)", rc, reg)
+			e.emitInstr("%s = call i8* @ql_spawn()", rc)
+			e.emitInstr("store i8* %s, i8** %s", rc, reg)
 			e.vars[st.name] = varInfo{reg: reg, isThread: true}
+			break
+		}
+		// channel 变量：c channel = taskm.channel() → 锁队列（i8*）
+		if st.typ == "channel" {
+			reg := e.newReg()
+			e.emitInstr("%s = alloca i8*, align 8", reg)
+			rc := e.newReg()
+			e.emitInstr("%s = call i8* @ql_channel_new(i32 1024)", rc)
+			e.emitInstr("store i8* %s, i8** %s", rc, reg)
+			e.vars[st.name] = varInfo{reg: reg}
 			break
 		}
 		// 先分配再求值：保证 SSA 寄存器编号单调递增
@@ -513,40 +529,52 @@ func (e *emitter) compileExpr(x *expr) (string, byte) {
 		c := e.compileCond(x)
 		return c, 'b'
 	case kMethod:
-		// taskm 全局：spawn() / block(pid)
+		// taskm 全局：spawn() / block(t.pid()) / done / channel / send / recv
 		if x.method.name == "taskm" {
 			switch x.method.method {
-			case "spawn":
-				// spawn()：返回 pid（新建空闲线程的 tid 低 32 位）
-				tid := e.newReg()
-				e.emitInstr("%s = alloca i64, align 8", tid)
-				rcx := e.newReg()
-				e.emitInstr("%s = call i32 @pthread_create(i64* %s, i8* null, i8* bitcast (i8* (i8*)* @idle_runner to i8*), i8* null)", rcx, tid)
-				tl := e.newReg()
-				e.emitInstr("%s = load i64, i64* %s", tl, tid)
-				pid := e.newReg()
-				e.emitInstr("%s = trunc i64 %s to i32", pid, tl)
-				return pid, 'i'
 			case "block":
-				// block(pid)：pid 来自 t.pid()（kMethod）→ join 对应 tid
 				if len(x.method.args) > 0 && x.method.args[0].kind == kMethod && x.method.args[0].method.method == "pid" {
-					ti, ok := e.vars[x.method.args[0].method.name]
-					if ok {
+					if ti, ok := e.vars[x.method.args[0].method.name]; ok && ti.isThread {
 						tl := e.newReg()
-						e.emitInstr("%s = load i64, i64* %s", tl, ti.reg)
+						e.emitInstr("%s = load i8*, i8** %s", tl, ti.reg)
+						e.emitInstr("call void @ql_block(i8* %s)", tl)
+					}
+				}
+				return "0", 'i'
+			case "done":
+				if len(x.method.args) > 0 && x.method.args[0].kind == kMethod && x.method.args[0].method.method == "pid" {
+					if ti, ok := e.vars[x.method.args[0].method.name]; ok && ti.isThread {
+						tl := e.newReg()
+						e.emitInstr("%s = load i8*, i8** %s", tl, ti.reg)
 						rc := e.newReg()
-						e.emitInstr("%s = call i32 @pthread_join(i64 %s, i8** null)", rc, tl)
+						e.emitInstr("%s = call i32 @ql_done(i8* %s)", rc, tl)
+						return rc, 'i'
 					}
 				}
 				return "0", 'i'
 			}
 			return "0", 'i'
 		}
+		// channel 变量方法：c.send(v) / c.recv()
+		if info, ok := e.vars[x.method.name]; ok {
+			cl := e.newReg()
+			e.emitInstr("%s = load i8*, i8** %s", cl, info.reg)
+			switch x.method.method {
+			case "send":
+				v, _ := e.compileExpr(x.method.args[0])
+				rc := e.newReg()
+				e.emitInstr("%s = call i32 @ql_send(i8* %s, i32 %s)", rc, cl, v)
+				return "0", 'i'
+			case "recv":
+				rc := e.newReg()
+				e.emitInstr("%s = call i32 @ql_recv(i8* %s)", rc, cl)
+				return rc, 'i'
+			}
+		}
 		// thread 变量方法：t.merge(fn[, arg]) / t.pid()
 		if info, ok := e.vars[x.method.name]; ok && info.isThread {
 			switch x.method.method {
 			case "merge":
-				// merge(fn[, arg])：新建 pthread 执行 fn（runner 生成）
 				fn := ""
 				argc := "0"
 				if len(x.method.args) > 0 && x.method.args[0].kind == kIdent {
@@ -556,26 +584,25 @@ func (e *emitter) compileExpr(x *expr) (string, byte) {
 					argc = "1"
 				}
 				rn := e.registerRunner(fn, argc)
-				var av string
+				tl := e.newReg()
+				e.emitInstr("%s = load i8*, i8** %s", tl, info.reg)
+				av := "0"
 				if argc == "1" {
 					a, _ := e.compileExpr(x.method.args[1])
-					av = e.newReg()
-					e.emitInstr("%s = inttoptr i32 %s to i8*", av, a)
-				} else {
-					av = "null"
+					av = a
 				}
-				rcx := e.newReg()
-				e.emitInstr("%s = call i32 @pthread_create(i64* %s, i8* null, i8* bitcast (i8* (i8*)* @%s to i8*), i8* %s)", rcx, info.reg, rn, av)
+				e.emitInstr("call void @ql_merge(i8* %s, i8* bitcast (i8* (i8*)* @%s to i8*), i32 %s)", tl, rn, av)
 				return "0", 'i'
 			case "pid":
 				tl := e.newReg()
-				e.emitInstr("%s = load i64, i64* %s", tl, info.reg)
+				e.emitInstr("%s = load i8*, i8** %s", tl, info.reg)
 				pid := e.newReg()
-				e.emitInstr("%s = trunc i64 %s to i32", pid, tl)
+				e.emitInstr("%s = ptrtoint i8* %s to i32", pid, tl)
 				return pid, 'i'
 			}
 			return "0", 'i'
 		}
+
 		// List 方法：size() / get(i)
 		info, ok := e.vars[x.method.name]
 		if !ok {

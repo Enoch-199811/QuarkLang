@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"path/filepath"
 	"strings"
 
@@ -18,6 +19,23 @@ import (
 
 // 增量编译：按源文件内容哈希缓存 IR 与原生二进制。
 // 缓存目录可用 QUARK_CACHE 覆盖，默认 <tmp>/quarklang-cache。
+// runtimeSrc 把嵌入的线程运行时写入临时文件并返回路径（并行载体：POSIX pthread；Windows 分支待补）。
+func runtimeSrc() string {
+	if runtime.GOOS == "windows" {
+		return "" // Windows 运行时待补（CreateThread 版）
+	}
+	f, err := os.CreateTemp("", "qthreads-*.c")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "runtimeSrc: create temp:", err)
+		return ""
+	}
+	if _, err := f.WriteString(qthreadsC); err != nil {
+		fmt.Fprintln(os.Stderr, "runtimeSrc: write:", err)
+	}
+	f.Close()
+	return f.Name()
+}
+
 func cacheDir() string {
 	dir := os.Getenv("QUARK_CACHE")
 	if dir == "" {
@@ -111,7 +129,11 @@ func main() {
 		os.Exit(1)
 	}
 	tmp.Close()
-	clangArgs := []string{tmp.Name(), "-o", binPath, "-Wno-override-module"}
+	clangArgs := []string{tmp.Name(), runtimeSrc(), "-o", binPath, "-Wno-override-module"}
+	// POSIX 载体：线程运行时需 -pthread（Windows 分支用 CreateThread 版运行时不加）
+	if runtime.GOOS != "windows" {
+		clangArgs = append(clangArgs, "-pthread")
+	}
 	clangArgs = append(clangArgs, strings.Fields(cflags)...)
 	cmd := exec.Command("clang", clangArgs...)
 	if out, err := cmd.CombinedOutput(); err != nil {

@@ -647,6 +647,27 @@ func (in *interp) evalExpr(e Expr, sc *scope, ctx *execCtx) (Value, error) {
 		return BoolV(x.V), nil
 	case *NullLit:
 		return NilV{}, nil
+	case *NewExpr:
+		// new <type>[size]：堆上申请（block 分配）；size 非法 → badAlloc
+		size := 1
+		if x.Size != nil {
+			sv, err := in.evalExpr(x.Size, sc, ctx)
+			if err != nil {
+				return nil, err
+			}
+			n, ok := sv.(IntV)
+			if !ok || n < 0 || n > 1<<26 {
+				ctx.Log.Append(StrV("badAlloc: invalid size"))
+				return nil, &RunError{Msg: "badAlloc: new " + x.Typ + " 申请大小非法", Pos: x.Pos, Ctx: ctx}
+			}
+			size = int(n)
+		}
+		// 在堆（block 管理）上申请
+		id := in.mem.Alloc(size*8, 0)
+		l := NewList()
+		l.mem = in.mem
+		l.blockID = id
+		return l, nil
 	case *StructLit:
 		st := x.Name
 		if st == "" {

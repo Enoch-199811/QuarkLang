@@ -194,6 +194,13 @@ type StructLit struct {
 	Name   string // 目标有名结构体（typecheck 填充），eval 用它建类型
 	Pos    Pos
 }
+
+// NewExpr：new <type>[size] —— 在堆上直接申请内存（失败返回 badAlloc）。
+type NewExpr struct {
+	Typ  string
+	Size Expr // nil = 单元素
+	Pos  Pos
+}
 type StructLitField struct {
 	Name string
 	X    Expr
@@ -243,6 +250,7 @@ func (*NullLit) isExpr()    {}
 func (*Ident) isExpr()      {}
 func (*ListLit) isExpr()    {}
 func (*StructLit) isExpr()  {}
+func (*NewExpr) isExpr()    {}
 func (*BinOp) isExpr()      {}
 func (*UnOp) isExpr()       {}
 func (*CallExpr) isExpr()   {}

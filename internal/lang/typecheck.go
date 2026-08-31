@@ -517,6 +517,14 @@ func (c *checker) substType(s string, subst map[string]*Type, pos Pos) (*Type, e
 		}
 		return &Type{Kind: tPtr, Elem: e}, nil
 	}
+	// pointer 修饰：pointer <T> 等价 T&（xmind/用户：指针修饰）
+	if strings.HasPrefix(s, "pointer ") {
+		e, err := c.substType(strings.TrimPrefix(s, "pointer "), subst, pos)
+		if err != nil {
+			return nil, err
+		}
+		return &Type{Kind: tPtr, Elem: e}, nil
+	}
 	base, inner, suffix := splitType(s)
 	// 裸类型参数替换（无内层、无后缀）
 	if subst != nil && inner == "" && suffix == "" {
@@ -954,6 +962,19 @@ func (c *checker) infer(e Expr, sc *cScope) (*Type, error) {
 		return tBoolV, nil
 	case *NullLit:
 		return &Type{Kind: tNull}, nil
+	case *NewExpr:
+		// new <type>[size]：返回指针（指向 List<T>；单元素指向 T）
+		elem, err := c.substType(x.Typ, c.curSubst, x.Pos)
+		if err != nil {
+			return nil, err
+		}
+		if x.Size != nil {
+			if _, err := c.infer(x.Size, sc); err != nil {
+				return nil, err
+			}
+			return &Type{Kind: tPtr, Elem: mkList(elem)}, nil
+		}
+		return &Type{Kind: tPtr, Elem: elem}, nil
 	case *StructLit:
 		// 匿名结构体字面量（.{in,out} 等）：带字段类型表的匿名结构体
 		fields := map[string]*Type{}

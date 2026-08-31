@@ -75,7 +75,8 @@ func compileSlow(src string) (*Program, error) {
 	return prog, nil
 }
 
-func (p *parser) cur() Token { return p.toks[p.i] }
+func (p *parser) cur() Token              { return p.toks[p.i] }
+func (p *parser) peekIs(k TokenKind) bool { return p.i+1 < len(p.toks) && p.toks[p.i+1].Kind == k }
 
 func (p *parser) peek() Token {
 	if p.i+1 < len(p.toks) {
@@ -663,6 +664,14 @@ func (p *parser) parseType() (string, error) {
 		return "", err
 	}
 	name := tok.Text
+	if name == "pointer" {
+		// pointer 修饰：pointer <type>（等价 T&，指向堆上数据）
+		rest, err := p.parseType()
+		if err != nil {
+			return "", err
+		}
+		return "pointer " + rest, nil
+	}
 	for p.curIs(TLt) {
 		name += "<"
 		p.advance()
@@ -681,7 +690,8 @@ func (p *parser) parseType() (string, error) {
 			p.advance()
 		}
 	}
-	if p.curIs(TLBracket) {
+	if p.curIs(TLBracket) && !p.peekIs(TInt) && !p.peekIs(TMinus) {
+		// 类型后缀 [Copyd]/[]：数字开头的 [ 是 new <type>[size] 的 size，不消费
 		p.advance()
 		if p.curIs(TRBracket) {
 			p.advance()
@@ -1172,6 +1182,27 @@ func (p *parser) parsePrimary() (Expr, error) {
 		}
 		return lit, nil
 	case TIdent:
+		if tok.Text == "new" {
+			// new <type>[size] —— 堆上直接申请内存（失败 badAlloc）
+			p.advance()
+			typ, err := p.parseType()
+			if err != nil {
+				return nil, err
+			}
+			ne := &NewExpr{Typ: typ, Pos: pos}
+			if p.curIs(TLBracket) {
+				p.advance()
+				sz, err := p.parseExpr()
+				if err != nil {
+					return nil, err
+				}
+				if _, err := p.expect(TRBracket, "']'"); err != nil {
+					return nil, err
+				}
+				ne.Size = sz
+			}
+			return ne, nil
+		}
 		p.advance()
 		return &Ident{Name: tok.Text, Pos: pos}, nil
 	case TLBracket:

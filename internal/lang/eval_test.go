@@ -696,3 +696,32 @@ func main(io IOStream) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+// pointer 修饰 + new <type>[size]（堆上申请，失败 badAlloc）
+func TestPointerAndNew(t *testing.T) {
+	out, err := runSrc(t, `func main(io IOStream) {
+    l pointer List<int> = new int[10];
+    io.println("ok");
+    delete l;
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "ok\n" {
+		t.Fatalf("got %q", out)
+	}
+}
+
+// new 非法大小 → badAlloc
+func TestNewBadAlloc(t *testing.T) {
+	_, err := runSrc(t, `func main(io IOStream) {
+    try {
+        bad pointer List<int> = new int[-1];
+    } catch (e void) {
+        io.println("badalloc");
+    }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+}

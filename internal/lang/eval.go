@@ -301,6 +301,7 @@ type interp struct {
 	taskMu     sync.Mutex
 	nextPid    int
 	mem        *MemoryManager
+	randState  uint64 // rand() LCG 状态（确定性伪随机）
 }
 
 // Run executes prog. args are command-line arguments for main(); stdin/stdout
@@ -1640,6 +1641,14 @@ func (in *interp) sumBuiltin(args []Value, pos Pos, ctx *execCtx) (Value, error)
 }
 
 func (in *interp) registerIOBuiltins() {
+	in.builtins["rand"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+		if len(args) != 0 {
+			return nil, wantArity("rand", 0, len(args), pos, ctx)
+		}
+		// LCG：确定性伪随机 [0, 2^31-1]
+		in.randState = in.randState*6364136223846793005 + 1442695040888963407
+		return IntV(int32(in.randState >> 33)), nil
+	}
 	in.builtins["sum"] = in.sumBuiltin
 	in.builtins["FileInputStream"] = in.fileInputStreamBuiltin
 	in.builtins["ifstream"] = in.fileInputStreamBuiltin

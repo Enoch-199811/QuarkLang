@@ -1652,6 +1652,11 @@ func (c *checker) inferCall(x *CallExpr, sc *cScope) (*Type, error) {
 			return nil, err
 		}
 		return tOutputStreamV, nil
+	case "rand":
+		if err := c.checkArity("rand", 0, len(args), id.Pos); err != nil {
+			return nil, err
+		}
+		return tIntV, nil
 	case "sum":
 		if len(args) != 3 && len(args) != 4 {
 			return nil, c.errf(id.Pos, "CompileError: sum(generate, begin, stop[, step]) 需要 3 或 4 个参数，got %d", len(args))

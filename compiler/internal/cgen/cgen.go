@@ -550,6 +550,10 @@ func (e *emitter) compileExpr(x *expr) (string, byte) {
 		e.emitInstr("%s = load i32, i32* %s", v, g2)
 		return v, 'i'
 	case kCall:
+		// sum(g, begin, stop[, step])：内联展开为循环（clang -O3 自动闭式化线性生成器）
+		if x.call.name == "sum" && len(x.call.args) >= 3 && x.call.args[0].kind == kIdent {
+			return e.emitSum(x.call), 'i'
+		}
 		// 函数调用：call i32 @name(i32 %a, ...)
 		argRegs := make([]string, 0, len(x.call.args))
 		for _, a := range x.call.args {
@@ -1416,4 +1420,51 @@ func (p *parser) parsePrimary() (*expr, error) {
 		return &expr{kind: kList, lst: lit}, nil
 	}
 	return nil, p.errf("unexpected character %q in expression", string(c))
+}
+
+// emitSum 把 sum(g, begin, stop[, step]) 内联展开为循环：
+// total = 0; for (i = begin; i < stop; i += step) total += g(i);
+// 线性生成器由 clang -O3 自动闭式化（乘加 O(1)）。
+func (e *emitter) emitSum(c *callExpr) string {
+	b, _ := e.compileExpr(c.args[1])
+	s, _ := e.compileExpr(c.args[2])
+	st := "1"
+	if len(c.args) == 4 {
+		st, _ = e.compileExpr(c.args[3])
+	}
+	gname := c.args[0].s
+	total := e.newReg()
+	e.emitInstr("%s = alloca i32, align 4", total)
+	e.emitInstr("store i32 0, i32* %s", total)
+	iv := e.newReg()
+	e.emitInstr("%s = alloca i32, align 4", iv)
+	e.emitInstr("store i32 %s, i32* %s", b, iv)
+	condB, bodyB, endB := e.newBlock(), e.newBlock(), e.newBlock()
+	e.emitInstr("br label %%%s", condB)
+	e.setBlock(condB)
+	li := e.newReg()
+	e.emitInstr("%s = load i32, i32* %s", li, iv)
+	c1 := e.newReg()
+	e.emitInstr("%s = icmp slt i32 %s, %s", c1, li, s)
+	e.emitInstr("br i1 %s, label %%%s, label %%%s", c1, bodyB, endB)
+	e.setBlock(bodyB)
+	li2 := e.newReg()
+	e.emitInstr("%s = load i32, i32* %s", li2, iv)
+	gv := e.newReg()
+	e.emitInstr("%s = call i32 @%s(i32 %s)", gv, gname, li2)
+	tl := e.newReg()
+	e.emitInstr("%s = load i32, i32* %s", tl, total)
+	t2 := e.newReg()
+	e.emitInstr("%s = add i32 %s, %s", t2, tl, gv)
+	e.emitInstr("store i32 %s, i32* %s", t2, total)
+	li3 := e.newReg()
+	e.emitInstr("%s = load i32, i32* %s", li3, iv)
+	ni := e.newReg()
+	e.emitInstr("%s = add i32 %s, %s", ni, li3, st)
+	e.emitInstr("store i32 %s, i32* %s", ni, iv)
+	e.emitInstr("br label %%%s", condB)
+	e.setBlock(endB)
+	tf := e.newReg()
+	e.emitInstr("%s = load i32, i32* %s", tf, total)
+	return tf
 }

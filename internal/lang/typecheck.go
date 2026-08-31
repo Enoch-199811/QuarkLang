@@ -1664,8 +1664,8 @@ func (c *checker) inferCall(x *CallExpr, sc *cScope) (*Type, error) {
 			return nil, err
 		}
 		return tOutputStreamV, nil
-	case "rand":
-		if err := c.checkArity("rand", 0, len(args), id.Pos); err != nil {
+	case "rand", "clock":
+		if err := c.checkArity(id.Name, 0, len(args), id.Pos); err != nil {
 			return nil, err
 		}
 		return tIntV, nil

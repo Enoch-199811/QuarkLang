@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 )
 
 // RunError is a runtime (or strict-check) error with source position and,
@@ -1761,6 +1762,12 @@ func detectPeriod(g func(int64) (int64, error), begin, step, n int64) (int64, bo
 }
 
 func (in *interp) registerIOBuiltins() {
+	in.builtins["clock"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+		if len(args) != 0 {
+			return nil, wantArity("clock", 0, len(args), pos, ctx)
+		}
+		return IntV(int32(time.Now().UnixMicro())), nil // 微秒
+	}
 	in.builtins["rand"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
 		if len(args) != 0 {
 			return nil, wantArity("rand", 0, len(args), pos, ctx)

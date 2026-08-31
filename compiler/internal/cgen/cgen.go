@@ -63,6 +63,16 @@ func (e *emitter) setBlock(name string) {
 	}
 }
 
+// toI64 把 i32 寄存器扩展为 i64（字面量直接可用）。
+func (e *emitter) toI64(reg string) string {
+	if strings.HasPrefix(reg, "%") {
+		r := e.newReg()
+		e.emitInstr("%s = sext i32 %s to i64", r, reg)
+		return r
+	}
+	return reg
+}
+
 func (e *emitter) newReg() string {
 	e.regCount++
 	return fmt.Sprintf("%%%d", e.regCount)
@@ -108,7 +118,8 @@ func (e *emitter) emitProgram(funcs []*funcDef, mainStmts []stmt) string {
 	e.b.WriteString("declare i32 @printf(i8* noundef, ...)\n")
 	e.b.WriteString("declare i8* @malloc(i64)\n")
 	e.b.WriteString("declare void @free(i8*)\n")
-	e.b.WriteString("declare i8* @realloc(i8*, i64)\n\n")
+	e.b.WriteString("declare i8* @realloc(i8*, i64)\n")
+	e.b.WriteString("declare i32 @gettimeofday({ i64, i64 }*, i8*)\n\n")
 	e.vars = map[string]varInfo{}
 	// 预注册全部字符串常量
 	e.strConst("true")
@@ -146,7 +157,7 @@ func (e *emitter) emitProgram(funcs []*funcDef, mainStmts []stmt) string {
 
 // emitFunc 生成单个非 main 函数的定义。
 func (e *emitter) emitFunc(fd *funcDef) string {
-	e.regCount = 0
+	// 注意：regCount 不重置——LLVM 寄存器编号是模块全局递增的
 	e.blockCount = 0
 	e.body.Reset()
 	e.vars = map[string]varInfo{}
@@ -277,6 +288,20 @@ func (e *emitter) emitStmt(s stmt) {
 			v, _ := e.compileExpr(st.init)
 			e.emitInstr("store i32 %s, i32* %s", v, reg)
 			e.vars[st.name] = varInfo{reg: reg}
+		}
+	case *indexAssignStmt:
+		// l[i] = v：取 ptr 字段 + gep + store
+		if info, ok := e.vars[st.name]; ok {
+			pf := e.newReg()
+			e.emitInstr("%s = getelementptr inbounds { i32*, i32 }, { i32*, i32 }* %s, i32 0, i32 0", pf, info.reg)
+			lp := e.newReg()
+			e.emitInstr("%s = load i32*, i32** %s", lp, pf)
+			i, _ := e.compileExpr(st.idx)
+			i64i := e.toI64(i)
+			g2 := e.newReg()
+			e.emitInstr("%s = getelementptr inbounds i32, i32* %s, i64 %s", g2, lp, i64i)
+			v, _ := e.compileExpr(st.x)
+			e.emitInstr("store i32 %s, i32* %s", v, g2)
 		}
 	case *deleteStmt:
 		// delete variable; —— 编译路径 = free（空闲队列语义由运行时内存管理器承担）
@@ -492,8 +517,9 @@ func (e *emitter) compileExpr(x *expr) (string, byte) {
 			lp := e.newReg()
 			e.emitInstr("%s = load i32*, i32** %s", lp, pf)
 			i, _ := e.compileExpr(x.method.args[0])
+			i64i := e.toI64(i)
 			g2 := e.newReg()
-			e.emitInstr("%s = getelementptr inbounds i32, i32* %s, i64 %s", g2, lp, i)
+			e.emitInstr("%s = getelementptr inbounds i32, i32* %s, i64 %s", g2, lp, i64i)
 			v := e.newReg()
 			e.emitInstr("%s = load i32, i32* %s", v, g2)
 			return v, 'i'
@@ -544,8 +570,9 @@ func (e *emitter) compileExpr(x *expr) (string, byte) {
 		lp := e.newReg()
 		e.emitInstr("%s = load i32*, i32** %s", lp, pf)
 		i, _ := e.compileExpr(x.idx.i)
+		i64i := e.toI64(i)
 		g2 := e.newReg()
-		e.emitInstr("%s = getelementptr inbounds i32, i32* %s, i64 %s", g2, lp, i)
+		e.emitInstr("%s = getelementptr inbounds i32, i32* %s, i64 %s", g2, lp, i64i)
 		v := e.newReg()
 		e.emitInstr("%s = load i32, i32* %s", v, g2)
 		return v, 'i'
@@ -553,6 +580,28 @@ func (e *emitter) compileExpr(x *expr) (string, byte) {
 		// sum(g, begin, stop[, step])：内联展开为循环（clang -O3 自动闭式化线性生成器）
 		if x.call.name == "sum" && len(x.call.args) >= 3 && x.call.args[0].kind == kIdent {
 			return e.emitSum(x.call), 'i'
+		}
+		// clock()：gettimeofday 微秒（编译路径延迟测量）
+		if x.call.name == "clock" {
+			tv := e.newReg()
+			e.emitInstr("%s = alloca { i64, i64 }, align 8", tv)
+			rc := e.newReg()
+			e.emitInstr("%s = call i32 @gettimeofday({ i64, i64 }* %s, i8* null)", rc, tv)
+			secf := e.newReg()
+			e.emitInstr("%s = getelementptr inbounds { i64, i64 }, { i64, i64 }* %s, i32 0, i32 0", secf, tv)
+			secl := e.newReg()
+			e.emitInstr("%s = load i64, i64* %s", secl, secf)
+			usf := e.newReg()
+			e.emitInstr("%s = getelementptr inbounds { i64, i64 }, { i64, i64 }* %s, i32 0, i32 1", usf, tv)
+			usl := e.newReg()
+			e.emitInstr("%s = load i64, i64* %s", usl, usf)
+			us := e.newReg()
+			e.emitInstr("%s = mul i64 %s, 1000000", us, secl)
+			u2 := e.newReg()
+			e.emitInstr("%s = add i64 %s, %s", u2, us, usl)
+			v := e.newReg()
+			e.emitInstr("%s = trunc i64 %s to i32", v, u2)
+			return v, 'i'
 		}
 		// 函数调用：call i32 @name(i32 %a, ...)
 		argRegs := make([]string, 0, len(x.call.args))
@@ -681,6 +730,12 @@ type deleteStmt struct {
 
 type exprStmt struct {
 	x *expr
+}
+
+type indexAssignStmt struct {
+	name string
+	idx  *expr
+	x    *expr
 }
 
 type varInfoList struct {
@@ -995,6 +1050,23 @@ func (p *parser) parseBlock() ([]stmt, error) {
 					return nil, err
 				}
 				p.skipSpace()
+				if p.pos < len(p.src) && p.src[p.pos] == '=' {
+					// l[i] = v 下标赋值
+					if xi := x; xi.kind == kIndex && xi.idx != nil {
+						p.pos++
+						p.skipSpace()
+						v, err := p.parseExpr()
+						if err != nil {
+							return nil, err
+						}
+						p.skipSpace()
+						if err := p.expect(';'); err != nil {
+							return nil, err
+						}
+						stmts = append(stmts, &indexAssignStmt{name: xi.idx.name, idx: xi.idx.i, x: v})
+						continue
+					}
+				}
 				if err := p.expect(';'); err != nil {
 					return nil, err
 				}

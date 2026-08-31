@@ -53,10 +53,11 @@ func main() {
 		os.Exit(1)
 	}
 	irPath := filepath.Join(cacheDir(), hash+".ll")
-	// 编译优化旗标（默认压到极限：-O3 + 本机指令集；QUARK_CFLAGS 可覆盖）
+	// 编译旗标：默认 -O3 跨系统便携（IR 与平台无关，目标平台 clang 生成原生二进制）；
+	// 本机极限可 QUARK_CFLAGS="-O3 -march=native"（产物仅当前 CPU 可运行）。
 	cflags := os.Getenv("QUARK_CFLAGS")
 	if cflags == "" {
-		cflags = "-O3 -march=native"
+		cflags = "-O3"
 	}
 	binKey := hash + "|" + cflags
 	binPath := filepath.Join(cacheDir(), binKey+".bin")

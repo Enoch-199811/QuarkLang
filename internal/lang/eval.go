@@ -1624,11 +1624,47 @@ func (in *interp) sumBuiltin(args []Value, pos Pos, ctx *execCtx) (Value, error)
 			if n <= 0 {
 				return IntV(0), nil
 			}
+			// 校验末项：周期函数（如 n%3）三点差分可能巧合相等，末项不符则非线性
 			last := g0 + d1*(n-1)
-			return IntV(n * (g0 + last) / 2), nil // 乘加闭式
+			if actual, err := g(int64(begin) + (n-1)*int64(step)); err == nil && actual == last {
+				return IntV(n * (g0 + last) / 2), nil // 乘加闭式
+			}
 		}
 	}
-	// 非线性：循环求和
+	// 位级置换：生成器序列有周期 P → 周期位统计预计算，O(P+bits) 乘加（P << n 时远快于循环）
+	if n := (int64(stop) - int64(begin) + int64(step) - 1) / int64(step); n > 0 {
+		if p, ok := detectPeriod(g, int64(begin), int64(step), n); ok && p < n {
+			// 一个周期的位统计：counts[k] = 周期内第 k 位为 1 的次数
+			var counts [32]int64
+			for j := int64(0); j < p; j++ {
+				v, err := g(int64(begin) + j*int64(step))
+				if err != nil {
+					return nil, err
+				}
+				for k := 0; k < 32; k++ {
+					if v&(1<<uint(k)) != 0 {
+						counts[k]++
+					}
+				}
+			}
+			q := n / p
+			r := n % p
+			var sum int64
+			for k := 0; k < 32; k++ {
+				sum += (q * counts[k]) << uint(k)
+			}
+			// 余数部分逐项补
+			for j := int64(0); j < r; j++ {
+				v, err := g(int64(begin) + j*int64(step))
+				if err != nil {
+					return nil, err
+				}
+				sum += v
+			}
+			return IntV(sum), nil
+		}
+	}
+	// 无短周期（如 32 位全周期随机数）：逐项加法（比逐项位统计更快）
 	var total int64
 	for i := int64(begin); i < int64(stop); i += int64(step) {
 		v, err := g(i)
@@ -1638,6 +1674,35 @@ func (in *interp) sumBuiltin(args []Value, pos Pos, ctx *execCtx) (Value, error)
 		total += v
 	}
 	return IntV(total), nil
+}
+
+// detectPeriod 检测生成器序列周期（最多探测 65536 项，步进 step）。
+func detectPeriod(g func(int64) (int64, error), begin, step, n int64) (int64, bool) {
+	limit := n
+	if limit > 65536 {
+		limit = 65536
+	}
+	v0, err := g(begin)
+	if err != nil {
+		return 0, false
+	}
+	for p := int64(1); p < limit; p++ {
+		v, err := g(begin + p*step)
+		if err != nil {
+			return 0, false
+		}
+		if v == v0 {
+			// 再验证一位确认周期
+			v2, err := g(begin + (p+1)*step)
+			if err == nil {
+				v3, _ := g(begin + step)
+				if v2 == v3 {
+					return p, true
+				}
+			}
+		}
+	}
+	return 0, false
 }
 
 func (in *interp) registerIOBuiltins() {

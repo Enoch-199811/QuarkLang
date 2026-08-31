@@ -1613,8 +1613,8 @@ func (in *interp) sumBuiltin(args []Value, pos Pos, ctx *execCtx) (Value, error)
 		}
 		return int64(n), nil
 	}
-	// 线性探测：二阶差分恒定 → 闭式 O(1)
-	if len(args) == 4 {
+	// 线性探测：二阶差分恒定 → 闭式 O(1)（3 参默认 step=1 同样探测）
+	if true {
 		g0, _ := g(int64(begin))
 		g1, _ := g(int64(begin) + int64(step))
 		g2, _ := g(int64(begin) + 2*int64(step))

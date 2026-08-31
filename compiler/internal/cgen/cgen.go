@@ -32,6 +32,7 @@ type varInfo struct {
 	param    bool // 函数参数：值寄存器，直接使用不 load
 	direct   bool // SSA 直通：单赋值变量直接用寄存器（免 alloca/load/store）
 	isThread bool // thread 变量：i64 tid 槽
+	isStruct bool // struct 参数/变量（值/指针）
 }
 
 type emitter struct {
@@ -51,6 +52,7 @@ type emitter struct {
 	structs      map[string][]string // struct 名 → 字段名
 	structVars   map[string]string   // struct 变量名 → alloca 寄存器
 	structTypes  map[string]string   // struct 变量名 → struct 类型名
+	methods      map[string]string   // struct 方法名（Type_method）→ 函数名
 }
 
 func (e *emitter) emitInstr(f string, args ...interface{}) {
@@ -125,8 +127,14 @@ func (e *emitter) emitProgram(funcs []*funcDef, mainStmts []stmt, structs []stru
 	e.structs = map[string][]string{}
 	e.structVars = map[string]string{}
 	e.structTypes = map[string]string{}
+	e.methods = map[string]string{}
 	for _, sd := range structs {
 		e.structs[sd.name] = sd.fields
+	}
+	for _, fd := range funcs {
+		if fd.selfTyp != "" {
+			e.methods[fd.selfTyp+"_"+strings.TrimPrefix(fd.name, fd.selfTyp+"_")] = fd.name
+		}
 	}
 	e.b.WriteString("declare i32 @printf(i8* noundef, ...)\n")
 	e.b.WriteString("declare i8* @malloc(i64)\n")
@@ -184,11 +192,28 @@ func (e *emitter) emitFunc(fd *funcDef) string {
 	e.vars = map[string]varInfo{}
 	var sig strings.Builder
 	sig.WriteString("define i32 @" + fd.name + "(")
+	off := 0
+	if fd.selfTyp != "" {
+		// receiver：struct 值参数 {i32 x N}
+		fields := e.structs[fd.selfTyp]
+		typ := "{ "
+		for i := 0; i < len(fields); i++ {
+			if i > 0 {
+				typ += ", "
+			}
+			typ += "i32"
+		}
+		typ += " }"
+		sig.WriteString(typ + " %self")
+		e.vars[fd.selfParam] = varInfo{reg: "self", param: true, isStruct: true}
+		e.structTypes[fd.selfParam] = fd.selfTyp
+		off = 1
+	}
 	for i, p := range fd.params {
-		if i > 0 {
+		if i+off > 0 {
 			sig.WriteString(", ")
 		}
-		reg := fmt.Sprintf("%%p%d", i)
+		reg := fmt.Sprintf("%%p%d", i+off)
 		sig.WriteString("i32 " + reg)
 		e.vars[p] = varInfo{reg: reg, param: true}
 	}
@@ -618,7 +643,7 @@ func (e *emitter) compileExpr(x *expr) (string, byte) {
 			}
 			return "0", 'i'
 		}
-		// struct 字段访问：p.a → gep + load
+		// struct 字段访问：p.a → gep+load（变量）或 extractvalue（参数）
 		if sr, ok := e.structVars[x.method.name]; ok {
 			fields := e.structs[e.structTypes[x.method.name]]
 			for i, fn := range fields {
@@ -629,6 +654,47 @@ func (e *emitter) compileExpr(x *expr) (string, byte) {
 					e.emitInstr("%s = load i32, i32* %s", v, f)
 					return v, 'i'
 				}
+			}
+		}
+		if si, ok := e.vars[x.method.name]; ok && si.isStruct && si.param {
+			if styp := e.structTypes[x.method.name]; styp != "" {
+				fields := e.structs[styp]
+				for i, fn := range fields {
+					if fn == x.method.method {
+						v := e.newReg()
+						e.emitInstr("%s = extractvalue { i32, i32 } %%%s, %d", v, si.reg, i)
+						return v, 'i'
+					}
+				}
+			}
+		}
+		// impl 方法调用：p.sum() → load struct + call @Point_sum
+		if sr, ok := e.structVars[x.method.name]; ok {
+			styp := e.structTypes[x.method.name]
+			if fname, ok := e.methods[styp+"_"+x.method.method]; ok {
+				fields := e.structs[styp]
+				typ := "{ "
+				for i := 0; i < len(fields); i++ {
+					if i > 0 {
+						typ += ", "
+					}
+					typ += "i32"
+				}
+				typ += " }"
+				sv := e.newReg()
+				e.emitInstr("%s = load %s, %s* %s", sv, typ, typ, sr)
+				args := make([]string, 0, len(x.method.args))
+				for _, a := range x.method.args {
+					av, _ := e.compileExpr(a)
+					args = append(args, av)
+				}
+				line := "  " + e.newReg() + " = call i32 @" + fname + "(" + typ + " " + sv
+				for _, a := range args {
+					line += ", i32 " + a
+				}
+				line += ")\n"
+				e.body.WriteString(line)
+				return strings.Fields(line)[0], 'i'
 			}
 		}
 		// channel 变量方法：c.send(v) / c.recv()
@@ -909,10 +975,12 @@ type whileStmt struct {
 // ---------- 递归下降解析器 ----------
 
 type funcDef struct {
-	name   string
-	params []string
-	ret    string
-	body   []stmt
+	name       string
+	params     []string
+	ret        string
+	body       []stmt
+	selfTyp    string // impl 方法 receiver struct 名
+	selfParam  string // receiver 参数名（self）
 }
 
 type structDef struct {
@@ -1064,14 +1132,94 @@ func (p *parser) parseProgram() error {
 			p.skipSpace()
 			continue
 		}
+		if name == "impl" {
+			p.skipSpace()
+			styp, err := p.expectIdent()
+			if err != nil {
+				return err
+			}
+			p.skipSpace()
+			if err := p.expect('{'); err != nil {
+				return err
+			}
+			for p.pos < len(p.src) {
+				p.skipSpace()
+				if p.pos < len(p.src) && p.src[p.pos] == '}' {
+					break
+				}
+				if p.pos+2 < len(p.src) && p.src[p.pos:p.pos+2] == "fn" {
+					p.pos += 2
+					if err := p.parseImplMethod(styp); err != nil {
+						return err
+					}
+				} else {
+					p.pos++
+				}
+			}
+			p.pos++
+			p.skipSpace()
+			continue
+		}
 		if name != "func" {
-			return p.errf("compiler v0.2 supports only func/type declarations, got %q", name)
+			return p.errf("compiler v0.2 supports only func/type/impl declarations, got %q", name)
 		}
 		if err := p.parseFunc(); err != nil {
 			return err
 		}
 		p.skipSpace()
 	}
+	return nil
+}
+
+// parseImplMethod：impl 的方法 fn name(self Type[, p1 T1]) ret { body }。
+func (p *parser) parseImplMethod(styp string) error {
+	p.skipSpace()
+	name, err := p.expectIdent()
+	if err != nil {
+		return err
+	}
+	p.skipSpace()
+	if err := p.expect('('); err != nil {
+		return err
+	}
+	p.skipSpace()
+	selfName, err := p.expectIdent()
+	if err != nil {
+		return err
+	}
+	p.skipSpace()
+	p.parseTypeName()
+	var params []string
+	p.skipSpace()
+	for p.pos < len(p.src) && p.src[p.pos] != ')' {
+		if p.src[p.pos] == ',' {
+			p.pos++
+		}
+		p.skipSpace()
+		pn, err := p.expectIdent()
+		if err != nil {
+			return err
+		}
+		params = append(params, pn)
+		p.skipSpace()
+		p.parseTypeName()
+		p.skipSpace()
+	}
+	p.pos++
+	p.skipSpace()
+	ret := ""
+	if p.pos < len(p.src) && p.src[p.pos] != '{' {
+		ret, _ = p.expectIdent()
+		p.skipSpace()
+	}
+	if err := p.expect('{'); err != nil {
+		return err
+	}
+	body, err := p.parseBlock()
+	if err != nil {
+		return err
+	}
+	p.funcs = append(p.funcs, &funcDef{name: styp + "_" + name, params: params, ret: ret, body: body, selfTyp: styp, selfParam: selfName})
 	return nil
 }
 

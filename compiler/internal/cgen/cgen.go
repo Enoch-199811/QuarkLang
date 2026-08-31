@@ -218,9 +218,11 @@ func (e *emitter) emitStmt(s stmt) {
 		e.emitPrintln(st)
 	case *declStmt:
 		if st.typ == "List<int>" {
-			// List<int> = [a, b, c]：malloc 3*i32 并写入（delete 时 free）
+			// List<int> = [a, b, c]：List 编译为 {i32*, i32}（ptr + len），支持 size()/get(i)
 			lit := st.init.lst
 			n := len(lit.items)
+			reg := e.newReg()
+			e.emitInstr("%s = alloca { i32*, i32 }, align 8", reg)
 			mc := e.newReg()
 			e.emitInstr("%s = call i8* @malloc(i64 %d)", mc, n*4)
 			p := e.newReg()
@@ -235,7 +237,13 @@ func (e *emitter) emitStmt(s stmt) {
 					e.emitInstr("store i32 %s, i32* %s", v, g2)
 				}
 			}
-			e.vars[st.name] = varInfo{reg: p, isList: true}
+			pf := e.newReg()
+			e.emitInstr("%s = getelementptr inbounds { i32*, i32 }, { i32*, i32 }* %s, i32 0, i32 0", pf, reg)
+			e.emitInstr("store i32* %s, i32** %s", p, pf)
+			lf := e.newReg()
+			e.emitInstr("%s = getelementptr inbounds { i32*, i32 }, { i32*, i32 }* %s, i32 0, i32 1", lf, reg)
+			e.emitInstr("store i32 %d, i32* %s", n, lf)
+			e.vars[st.name] = varInfo{reg: reg, isList: true}
 			break
 		}
 		// 先分配再求值：保证 SSA 寄存器编号单调递增
@@ -257,9 +265,19 @@ func (e *emitter) emitStmt(s stmt) {
 		if !ok {
 			break
 		}
-		c := e.newReg()
-		e.emitInstr("%s = bitcast i32* %s to i8*", c, info.reg)
-		e.emitInstr("call void @free(i8* %s)", c)
+		if info.isList {
+			pf := e.newReg()
+			e.emitInstr("%s = getelementptr inbounds { i32*, i32 }, { i32*, i32 }* %s, i32 0, i32 0", pf, info.reg)
+			lp := e.newReg()
+			e.emitInstr("%s = load i32*, i32** %s", lp, pf)
+			c := e.newReg()
+			e.emitInstr("%s = bitcast i32* %s to i8*", c, lp)
+			e.emitInstr("call void @free(i8* %s)", c)
+		} else {
+			c := e.newReg()
+			e.emitInstr("%s = bitcast i32* %s to i8*", c, info.reg)
+			e.emitInstr("call void @free(i8* %s)", c)
+		}
 	case *assignStmt:
 		info, ok := e.vars[st.name]
 		if !ok {
@@ -436,15 +454,45 @@ func (e *emitter) compileExpr(x *expr) (string, byte) {
 	case kCmp, kAndOr:
 		c := e.compileCond(x)
 		return c, 'b'
+	case kMethod:
+		// List 方法：size() / get(i)
+		info, ok := e.vars[x.method.name]
+		if !ok {
+			return "0", 'i'
+		}
+		switch x.method.method {
+		case "size":
+			lf := e.newReg()
+			e.emitInstr("%s = getelementptr inbounds { i32*, i32 }, { i32*, i32 }* %s, i32 0, i32 1", lf, info.reg)
+			v := e.newReg()
+			e.emitInstr("%s = load i32, i32* %s", v, lf)
+			return v, 'i'
+		case "get":
+			pf := e.newReg()
+			e.emitInstr("%s = getelementptr inbounds { i32*, i32 }, { i32*, i32 }* %s, i32 0, i32 0", pf, info.reg)
+			lp := e.newReg()
+			e.emitInstr("%s = load i32*, i32** %s", lp, pf)
+			i, _ := e.compileExpr(x.method.args[0])
+			g2 := e.newReg()
+			e.emitInstr("%s = getelementptr inbounds i32, i32* %s, i64 %s", g2, lp, i)
+			v := e.newReg()
+			e.emitInstr("%s = load i32, i32* %s", v, g2)
+			return v, 'i'
+		}
+		return "0", 'i'
 	case kIndex:
-		// list[i]：getelementptr + load（List<int> 编译为 i32*）
+		// list[i]：取结构体 ptr 字段再下标（{i32*, i32}）
 		info, ok := e.vars[x.idx.name]
 		if !ok {
 			return "0", 'i'
 		}
+		pf := e.newReg()
+		e.emitInstr("%s = getelementptr inbounds { i32*, i32 }, { i32*, i32 }* %s, i32 0, i32 0", pf, info.reg)
+		lp := e.newReg()
+		e.emitInstr("%s = load i32*, i32** %s", lp, pf)
 		i, _ := e.compileExpr(x.idx.i)
 		g2 := e.newReg()
-		e.emitInstr("%s = getelementptr inbounds i32, i32* %s, i64 %s", g2, info.reg, i)
+		e.emitInstr("%s = getelementptr inbounds i32, i32* %s, i64 %s", g2, lp, i)
 		v := e.newReg()
 		e.emitInstr("%s = load i32, i32* %s", v, g2)
 		return v, 'i'
@@ -488,6 +536,7 @@ const (
 	kCall
 	kList
 	kIndex
+	kMethod
 )
 
 type expr struct {
@@ -497,15 +546,22 @@ type expr struct {
 	s    string
 	op   string
 	l, r *expr
-	call *callExpr // kCall
-	lst  *listLit  // kList
-	idx  *indexExpr // kIndex
-	sc   strConst  // 预注册的字符串常量（kString）
+	call *callExpr  // kCall
+	lst  *listLit   // kList
+	idx    *indexExpr  // kIndex
+	method *methodExpr // kMethod
+	sc     strConst   // 预注册的字符串常量（kString）
 }
 
 type indexExpr struct {
 	name string
 	i    *expr
+}
+
+type methodExpr struct {
+	name   string
+	method string
+	args   []*expr
 }
 
 type stmt interface{}
@@ -1113,6 +1169,38 @@ func (p *parser) parsePrimary() (*expr, error) {
 				return nil, err
 			}
 			return &expr{kind: kIndex, idx: &indexExpr{name: name, i: ie}}, nil
+		}
+		// 方法调用：name.method(args)（如 l.size() / l.get(i)）
+		p.skipSpace()
+		if p.pos < len(p.src) && p.src[p.pos] == '.' {
+			p.pos++
+			m, err := p.expectIdent()
+			if err != nil {
+				return nil, err
+			}
+			me := &methodExpr{name: name, method: m}
+			p.skipSpace()
+			if p.pos < len(p.src) && p.src[p.pos] == '(' {
+				p.pos++
+				for {
+					p.skipSpace()
+					if p.pos < len(p.src) && p.src[p.pos] == ')' {
+						p.pos++
+						break
+					}
+					a, err := p.parseExpr()
+					if err != nil {
+						return nil, err
+					}
+					me.args = append(me.args, a)
+					p.skipSpace()
+					if p.pos < len(p.src) && p.src[p.pos] == ',' {
+						p.pos++
+						continue
+					}
+				}
+			}
+			return &expr{kind: kMethod, method: me}, nil
 		}
 		return &expr{kind: kIdent, s: name}, nil
 	case c == '-':

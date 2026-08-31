@@ -30,6 +30,7 @@ type varInfo struct {
 	isStr  bool
 	isList bool
 	param  bool // 函数参数：值寄存器，直接使用不 load
+	direct bool // SSA 直通：单赋值变量直接用寄存器（免 alloca/load/store）
 }
 
 type emitter struct {
@@ -41,7 +42,8 @@ type emitter struct {
 	regCount     int
 	strs         map[string]strConst
 	strCount     int
-	funcReturned bool // 函数已 ret（后续语句不可达，跳过生成）
+	funcReturned bool          // 函数已 ret（后续语句不可达，跳过生成）
+	assigned     map[string]bool // 被赋值变量（SSA 直通判定）
 }
 
 func (e *emitter) emitInstr(f string, args ...interface{}) {
@@ -119,6 +121,12 @@ func (e *emitter) emitProgram(funcs []*funcDef, mainStmts []stmt) string {
 	for _, s := range mainStmts {
 		e.preRegisterStmt(s)
 	}
+	// 预扫描被赋值变量（决定 SSA 直通）
+	e.assigned = map[string]bool{}
+	for _, fd := range funcs {
+		scanAssigned(fd.body, e.assigned)
+	}
+	scanAssigned(mainStmts, e.assigned)
 	// 先生成全部函数体（期间动态字符串常量追加到 e.b），最后统一组装：常量全部先于函数
 	var bodies strings.Builder
 	for _, fd := range funcs {
@@ -252,6 +260,12 @@ func (e *emitter) emitStmt(s stmt) {
 			break
 		}
 		// 先分配再求值：保证 SSA 寄存器编号单调递增
+		if st.typ == "int" && !e.assigned[st.name] && !e.funcReturned {
+			// SSA 直通：单赋值 int 变量直接用寄存器（免 alloca/load/store）
+			v, _ := e.compileExpr(st.init)
+			e.vars[st.name] = varInfo{reg: v, direct: true}
+			break
+		}
 		reg := e.newReg()
 		if st.typ == "String" {
 			e.emitInstr("%s = alloca i8*, align 8", reg)
@@ -446,8 +460,8 @@ func (e *emitter) compileExpr(x *expr) (string, byte) {
 		if !ok {
 			return x.s, 'i' // 未声明变量：让生成的 IR 报错（llvm-as 校验会拦截）
 		}
-		if info.param {
-			return info.reg, 'i' // 函数参数是值寄存器，直接使用
+		if info.param || info.direct {
+			return info.reg, 'i' // 参数/SSA 直通变量：值寄存器直接使用
 		}
 		reg := e.newReg()
 		if info.isStr {
@@ -1018,6 +1032,21 @@ func constEval(x *expr) (int64, bool) {
 		}
 	}
 	return 0, false
+}
+
+// scanAssigned 收集语句中所有被赋值（assignStmt）的变量名 —— 决定哪些 decl 可 SSA 直通。
+func scanAssigned(stmts []stmt, out map[string]bool) {
+	for _, s := range stmts {
+		switch st := s.(type) {
+		case *assignStmt:
+			out[st.name] = true
+		case *ifStmt:
+			scanAssigned(st.then, out)
+			scanAssigned(st.els, out)
+		case *whileStmt:
+			scanAssigned(st.body, out)
+		}
+	}
 }
 
 // parseTypeName 解析类型注解：int / String / List<int>（编译器支持的子集）。

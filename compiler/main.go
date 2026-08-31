@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"quarklang/compiler/internal/cgen"
 )
@@ -52,7 +53,13 @@ func main() {
 		os.Exit(1)
 	}
 	irPath := filepath.Join(cacheDir(), hash+".ll")
-	binPath := filepath.Join(cacheDir(), hash+".bin")
+	// 编译优化旗标（默认压到极限：-O3 + 本机指令集；QUARK_CFLAGS 可覆盖）
+	cflags := os.Getenv("QUARK_CFLAGS")
+	if cflags == "" {
+		cflags = "-O3 -march=native"
+	}
+	binKey := hash + "|" + cflags
+	binPath := filepath.Join(cacheDir(), binKey+".bin")
 
 	// -run：二进制缓存命中 → 直接执行（跳过全编译 + clang）
 	if run {
@@ -103,7 +110,9 @@ func main() {
 		os.Exit(1)
 	}
 	tmp.Close()
-	cmd := exec.Command("clang", tmp.Name(), "-o", binPath, "-O2", "-Wno-override-module")
+	clangArgs := []string{tmp.Name(), "-o", binPath, "-Wno-override-module"}
+	clangArgs = append(clangArgs, strings.Fields(cflags)...)
+	cmd := exec.Command("clang", clangArgs...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		fmt.Fprintln(os.Stderr, "clang:", string(out))
 		os.Exit(1)

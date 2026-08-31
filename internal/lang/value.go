@@ -233,6 +233,18 @@ type Func struct {
 	Ret        string
 	Body       *Block
 	Pos        Pos
+	paramNames []string // 参数名缓存（槽位绑定用，共享零分配）
+}
+
+// ParamNames 返回参数名数组（惰性缓存，所有调用共享）。
+func (f *Func) ParamNames() []string {
+	if f.paramNames == nil {
+		f.paramNames = make([]string, len(f.Params))
+		for i, p := range f.Params {
+			f.paramNames[i] = p.Name
+		}
+	}
+	return f.paramNames
 }
 
 // execCtx 是函数执行的内部上下文（v2：语言面不再有 FuncBuffer）。

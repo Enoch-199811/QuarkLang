@@ -27,8 +27,10 @@ func (e *RunError) Error() string {
 var errReturn = errors.New("__return__")
 
 type scope struct {
-	vars  map[string]Value
-	outer *scope
+	vars       map[string]Value
+	slots      []Value // 参数槽位（前 len(paramNames) 个为参数，线性访问免哈希）
+	paramNames []string
+	outer      *scope
 }
 
 // newScope 懒分配 vars（nil map 直到首个 declare —— 高计算场景省空 map 分配）。
@@ -36,7 +38,27 @@ func newScope(outer *scope) *scope {
 	return &scope{outer: outer}
 }
 
+// setParams 绑定函数参数到线性槽位（参数通常少，线性扫描比 map 哈希快）。
+func (s *scope) setParams(names []string, args []Value) {
+	s.paramNames = names
+	s.slots = args
+}
+
+// paramIndex 线性查找参数槽位索引（-1 表示非参数）。
+func (s *scope) paramIndex(name string) int {
+	for i, n := range s.paramNames {
+		if n == name {
+			return i
+		}
+	}
+	return -1
+}
+
 func (s *scope) declare(name string, v Value, pos Pos) error {
+	// 参数槽位已存在（execute 绑定），局部变量才入 map
+	if s.paramIndex(name) >= 0 {
+		return nil
+	}
 	if s.vars == nil {
 		s.vars = map[string]Value{}
 	}
@@ -49,6 +71,10 @@ func (s *scope) declare(name string, v Value, pos Pos) error {
 
 func (s *scope) set(name string, v Value, pos Pos) error {
 	for sc := s; sc != nil; sc = sc.outer {
+		if i := sc.paramIndex(name); i >= 0 {
+			sc.slots[i] = v
+			return nil
+		}
 		if sc.vars == nil {
 			continue
 		}
@@ -62,6 +88,12 @@ func (s *scope) set(name string, v Value, pos Pos) error {
 
 func (s *scope) get(name string, pos Pos) (Value, error) {
 	for sc := s; sc != nil; sc = sc.outer {
+		if i := sc.paramIndex(name); i >= 0 {
+			return sc.slots[i], nil
+		}
+		if sc.vars == nil {
+			continue
+		}
 		if v, ok := sc.vars[name]; ok {
 			return v, nil
 		}
@@ -444,15 +476,14 @@ func (in *interp) execute(ctx *execCtx) error {
 	// 预声明常量（xmind §内存）：DynamicStackAndHeap 实验模式标志
 	_ = sc.declare("DynamicStackAndHeap", StrV("DynamicStackAndHeap"), ctx.Fn.Pos)
 	fn := ctx.Fn
+	// 参数绑定到线性槽位：参数名缓存共享（零分配），值直接复用 ctx.Args
+	args := ctx.Args
 	for i, p := range fn.Params {
-		v := ctx.Args[i]
 		if isCopydType(p.Type) {
-			v = deepCopy(v)
-		}
-		if err := sc.declare(p.Name, v, p.Pos); err != nil {
-			return err
+			args[i] = deepCopy(args[i])
 		}
 	}
+	sc.setParams(fn.ParamNames(), args)
 	if err := in.execBlock(fn.Body, sc, ctx); err != nil {
 		if errors.Is(err, errReturn) {
 			return nil

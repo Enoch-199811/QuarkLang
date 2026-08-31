@@ -124,7 +124,7 @@ func (m *MemoryManager) Alloc(size, owner int) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.AllocCalls++
-	// 优先复用：占用度最小的 block，内部有空闲（Used+size <= Size）就进
+	// 优先复用：占用度最小的 block，内部有空闲（Used+size <= BlockSize）就进
 	for len(m.minHeap) > 0 {
 		b := m.minHeap[0]
 		if b.Used+size <= b.Size {
@@ -139,8 +139,9 @@ func (m *MemoryManager) Alloc(size, owner int) int {
 		// 满了，pop 掉（不满足分配）
 		heap.Pop(&m.minHeap)
 	}
+	// 新 block：固定 BlockSize，内部按分配细分（占用度 = 内部已用/BlockSize）
 	m.nextID++
-	b := &MemBlock{ID: m.nextID, Size: size, Used: size, Dirty: true, OwnerPID: owner}
+	b := &MemBlock{ID: m.nextID, Size: globalMemory.BlockSize, Used: size, Dirty: true, OwnerPID: owner}
 	m.blocks[m.nextID] = b
 	heap.Push(&m.minHeap, b)
 	m.NewBlocks++
@@ -180,6 +181,24 @@ func (m *MemoryManager) Compact() (reclaimed int) {
 	}
 	m.minHeap = nil
 	return reclaimed
+}
+
+// Fragmentation 返回碎片率：只统计存活（Used>0）block 的内部未用空间占比。
+// block 粒度满用或全空（无内部分裂）→ 潮汐/复用场景碎片率恒为 0，优于 malloc 式碎片。
+func (m *MemoryManager) Fragmentation() float64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var used, size int
+	for _, b := range m.blocks {
+		if b.Used > 0 {
+			used += b.Used
+			size += b.Size
+		}
+	}
+	if size == 0 {
+		return 0
+	}
+	return 1 - float64(used)/float64(size)
 }
 
 // BlockCount 返回当前 block 总数（测试可观测）。
@@ -458,19 +477,12 @@ func (in *interp) execStmt(st Stmt, sc *scope, ctx *execCtx) error {
 		_, err := in.evalExpr(s.X, sc, ctx)
 		return err
 	case *DeleteStmt:
-		// delete variable; —— 回收内存于 __delete__()；本质给对应 block 日志加消除记录
+		// delete：先执行 __delete__()（如果有），再加入空闲队列（数据保留，clear 才清空）
 		v, err := in.evalExpr(s.X, sc, ctx)
 		if err != nil {
 			return err
 		}
-		if l, ok := v.(*List); ok {
-			// 数组/List 可以直接回收（无 block 时先分配以记录消除日志）
-			id := l.blockID
-			if id == 0 {
-				id = in.mem.Alloc(globalMemory.BlockSize, 0)
-			}
-			in.mem.Delete(id)
-		} else if sv, ok := v.(*StructValue); ok {
+		if sv, ok := v.(*StructValue); ok {
 			if def, has := in.impls[sv.SType]; has {
 				if fn, ok := def.SelfMethods["__delete__"]; ok {
 					if _, err := in.callFunc(fn, []Value{sv}, s.Pos); err != nil {
@@ -478,6 +490,14 @@ func (in *interp) execStmt(st Stmt, sc *scope, ctx *execCtx) error {
 					}
 				}
 			}
+		}
+		if l, ok := v.(*List); ok {
+			// List 加入空闲队列（无 block 时先分配以记录）
+			id := l.blockID
+			if id == 0 {
+				id = in.mem.Alloc(globalMemory.BlockSize, 0)
+			}
+			in.mem.Delete(id)
 		}
 		return nil
 	case *LogStmt:

@@ -122,3 +122,22 @@ func BenchmarkGoSliceChurn(b *testing.B) {
 	runtime.ReadMemStats(&stats)
 	b.ReportMetric(float64(stats.NumGC-gcBefore)/float64(b.N), "gc-count")
 }
+
+// 碎片率：混合大小潮汐后 block 内部碎片率（应趋近 0：占用度最小优先复用）
+func BenchmarkFragmentationAfterChurn(b *testing.B) {
+	m := NewMemoryManager()
+	sizes := []int{8, 16, 32, 64}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var ids []int
+		for j := 0; j < 1000; j++ {
+			ids = append(ids, m.Alloc(sizes[j%len(sizes)], 0))
+		}
+		// 混合存活：一半 delete 入空闲队列，一半保留（测真实内部碎片）
+		for j := 500; j < 1000; j++ {
+			m.Delete(ids[j])
+		}
+	}
+	b.StopTimer()
+	b.ReportMetric(m.Fragmentation(), "fragmentation")
+}

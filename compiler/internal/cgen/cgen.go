@@ -105,7 +105,8 @@ func llvmEscape(b []byte) string {
 func (e *emitter) emitProgram(funcs []*funcDef, mainStmts []stmt) string {
 	e.b.WriteString("declare i32 @printf(i8* noundef, ...)\n")
 	e.b.WriteString("declare i8* @malloc(i64)\n")
-	e.b.WriteString("declare void @free(i8*)\n\n")
+	e.b.WriteString("declare void @free(i8*)\n")
+	e.b.WriteString("declare i8* @realloc(i8*, i64)\n\n")
 	e.vars = map[string]varInfo{}
 	// 预注册全部字符串常量
 	e.strConst("true")
@@ -168,6 +169,8 @@ func (e *emitter) preRegisterStmt(s stmt) {
 		for _, a := range st.args {
 			e.preRegister(a)
 		}
+	case *exprStmt:
+		e.preRegister(st.x)
 	case *declStmt:
 		e.preRegister(st.init)
 	case *assignStmt:
@@ -210,6 +213,8 @@ func (e *emitter) emitBlock(stmts []stmt) {
 
 func (e *emitter) emitStmt(s stmt) {
 	switch st := s.(type) {
+	case *exprStmt:
+		e.compileExpr(st.x) // 副作用求值，结果丢弃
 	case *returnStmt:
 		v, _ := e.compileExpr(st.x)
 		e.emitInstr("ret i32 %s", v)
@@ -478,6 +483,40 @@ func (e *emitter) compileExpr(x *expr) (string, byte) {
 			v := e.newReg()
 			e.emitInstr("%s = load i32, i32* %s", v, g2)
 			return v, 'i'
+		case "append":
+			// l.append(v)：realloc 扩容 + 写入 + len++
+			pf := e.newReg()
+			e.emitInstr("%s = getelementptr inbounds { i32*, i32 }, { i32*, i32 }* %s, i32 0, i32 0", pf, info.reg)
+			lp := e.newReg()
+			e.emitInstr("%s = load i32*, i32** %s", lp, pf)
+			lf := e.newReg()
+			e.emitInstr("%s = getelementptr inbounds { i32*, i32 }, { i32*, i32 }* %s, i32 0, i32 1", lf, info.reg)
+			l1 := e.newReg()
+			e.emitInstr("%s = load i32, i32* %s", l1, lf)
+			// realloc(lp, (l1+1)*4)
+			n1 := e.newReg()
+			e.emitInstr("%s = add i32 %s, 1", n1, l1)
+			n64 := e.newReg()
+			e.emitInstr("%s = sext i32 %s to i64", n64, n1)
+			sz := e.newReg()
+			e.emitInstr("%s = mul i64 %s, 4", sz, n64)
+			bc := e.newReg()
+			e.emitInstr("%s = bitcast i32* %s to i8*", bc, lp)
+			rc := e.newReg()
+			e.emitInstr("%s = call i8* @realloc(i8* %s, i64 %s)", rc, bc, sz)
+			np := e.newReg()
+			e.emitInstr("%s = bitcast i8* %s to i32*", np, rc)
+			e.emitInstr("store i32* %s, i32** %s", np, pf)
+			l1i := e.newReg()
+			e.emitInstr("%s = sext i32 %s to i64", l1i, l1)
+			g2 := e.newReg()
+			e.emitInstr("%s = getelementptr inbounds i32, i32* %s, i64 %s", g2, np, l1i)
+			v, _ := e.compileExpr(x.method.args[0])
+			e.emitInstr("store i32 %s, i32* %s", v, g2)
+			l2 := e.newReg()
+			e.emitInstr("%s = add i32 %s, 1", l2, l1)
+			e.emitInstr("store i32 %s, i32* %s", l2, lf)
+			return "0", 'i'
 		}
 		return "0", 'i'
 	case kIndex:
@@ -616,6 +655,10 @@ type listLit struct {
 
 type deleteStmt struct {
 	name string
+}
+
+type exprStmt struct {
+	x *expr
 }
 
 type varInfoList struct {
@@ -767,6 +810,7 @@ func (p *parser) parseBlock() ([]stmt, error) {
 			p.pos++
 			return stmts, nil
 		}
+		stmtStart := p.pos
 		first, err := p.expectIdent()
 		if err != nil {
 			return nil, err
@@ -922,7 +966,17 @@ func (p *parser) parseBlock() ([]stmt, error) {
 				}
 				stmts = append(stmts, &declStmt{name: first, typ: typ, init: init})
 			} else {
-				return nil, p.errf("unsupported statement starting with %q", first)
+				// 表达式语句：expr;（如 l.size();）——回溯到语句起点完整解析
+				p.pos = stmtStart
+				x, err := p.parseExpr()
+				if err != nil {
+					return nil, err
+				}
+				p.skipSpace()
+				if err := p.expect(';'); err != nil {
+					return nil, err
+				}
+				stmts = append(stmts, &exprStmt{x: x})
 			}
 		}
 	}
@@ -942,6 +996,13 @@ func (p *parser) parseTypeName() string {
 		return "List<int>"
 	}
 	return t
+}
+
+func (p *parser) peekChar() byte {
+	if p.pos < len(p.src) {
+		return p.src[p.pos]
+	}
+	return 0
 }
 
 func (p *parser) parseExpr() (*expr, error) {

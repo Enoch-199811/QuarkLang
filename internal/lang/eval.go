@@ -292,17 +292,18 @@ type ImplDef struct {
 }
 
 type interp struct {
-	fns        map[string]*Func
-	sigs       map[string]*signDef
-	builtins   map[string]builtinFn
-	structs    map[string]*StructDef
-	interfaces map[string]*InterfaceDef
-	impls      map[string]*ImplDef
-	tasks      map[int]*Task
-	taskMu     sync.Mutex
-	nextPid    int
-	mem        *MemoryManager
-	randState  uint64 // rand() LCG 状态（确定性伪随机）
+	fns         map[string]*Func
+	sigs        map[string]*signDef
+	builtins    map[string]builtinFn
+	structs     map[string]*StructDef
+	interfaces  map[string]*InterfaceDef
+	impls       map[string]*ImplDef
+	tasks       map[int]*Task
+	taskMu      sync.Mutex
+	nextPid     int
+	mem         *MemoryManager
+	randState   uint64 // rand() LCG 状态（确定性伪随机）
+	globalScope *scope // 全局作用域（常量预声明一次）
 }
 
 // Run executes prog. args are command-line arguments for main(); stdin/stdout
@@ -328,6 +329,8 @@ func runWithInterp(prog *Program, filename string, args []string, stdin io.Reade
 		tasks:      map[int]*Task{},
 		mem:        NewMemoryManager(),
 	}
+	in.globalScope = newScope(nil)
+	_ = in.globalScope.declare("DynamicStackAndHeap", StrV("DynamicStackAndHeap"), Pos{})
 	for _, f := range prog.Funcs {
 		if _, dup := in.fns[f.Name]; dup {
 			return nil, fmt.Errorf("CompileError: duplicate function %q", f.Name)
@@ -474,9 +477,7 @@ func (in *interp) execute(ctx *execCtx) error {
 	}
 	ctx.executed = true
 
-	sc := newScope(nil)
-	// 预声明常量（xmind §内存）：DynamicStackAndHeap 实验模式标志
-	_ = sc.declare("DynamicStackAndHeap", StrV("DynamicStackAndHeap"), ctx.Fn.Pos)
+	sc := newScope(in.globalScope) // 全局作用域（DynamicStackAndHeap 等预声明一次，outer 链可见）
 	fn := ctx.Fn
 	// 参数绑定到线性槽位：参数名缓存共享（零分配），值直接复用 ctx.Args
 	args := ctx.Args

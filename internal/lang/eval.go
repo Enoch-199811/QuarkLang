@@ -786,6 +786,39 @@ func (in *interp) evalExpr(e Expr, sc *scope, ctx *execCtx) (Value, error) {
 		if err != nil {
 			return nil, err
 		}
+		// 快路径：两侧都是 int 的算术/位移直通（免 binOp 分发，fib/循环类大热）
+		if li, ok := l.(IntV); ok && x.Op != "&&" && x.Op != "||" {
+			if rv, err := in.evalExpr(x.R, sc, ctx); err == nil {
+				if ri, ok := rv.(IntV); ok {
+					switch x.Op {
+					case "+":
+						return wrapI32(int64(li) + int64(ri)), nil
+					case "-":
+						return wrapI32(int64(li) - int64(ri)), nil
+					case "*":
+						if n, ok := pow2(int32(ri)); ok {
+							return wrapI32(int64(int32(li) << uint(n))), nil
+						}
+						return wrapI32(int64(li) * int64(ri)), nil
+					case "/":
+						if ri == 0 {
+							return nil, &RunError{Msg: "DivisionByZeroError: integer division by zero", Pos: x.Pos, Ctx: ctx}
+						}
+						return wrapI32(int64(li) / int64(ri)), nil
+					case "%":
+						if ri == 0 {
+							return nil, &RunError{Msg: "DivisionByZeroError: modulo by zero", Pos: x.Pos, Ctx: ctx}
+						}
+						return wrapI32(int64(li) % int64(ri)), nil
+					case "<<":
+						return IntV(int32(li) << uint(ri&31)), nil
+					case ">>":
+						return IntV(int32(li) >> uint(ri&31)), nil
+					}
+				}
+				return binOp(x.Op, l, rv, x.Pos, ctx)
+			}
+		}
 		if x.Op == "&&" {
 			lb, err := truthy(l)
 			if err != nil {

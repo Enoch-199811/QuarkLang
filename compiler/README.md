@@ -12,7 +12,7 @@ go test ./...
 
 ## 支持子集（随迭代扩大）
 
-- `func main(io IOStream) { ... }`
+- `fn main(io IOStream) { ... }`
 - 变量：`x int = expr;` / `s String = "...";` 与赋值 `x = expr;`（alloca/store/load）
 - 控制流：`if (cond) {...} else {...}`、`while (cond) {...}`（基本块 + br）
 - 表达式：算术 `+ - * / %`、比较 `== != < <= > >=`（icmp）、`&& || !`、布尔字面量（select true/false 输出）

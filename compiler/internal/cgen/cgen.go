@@ -1242,7 +1242,10 @@ func (p *parser) parseProgram() error {
 			continue
 		}
 		if name != "fn" {
-			return p.errf("compiler v0.2 supports only func/type/impl declarations, got %q", name)
+			if name == "func" {
+				return p.errf("函数声明关键字是 fn：func main(...) 应写为 fn main(...)")
+			}
+			return p.errf("compiler v0.2 supports only fn/type/impl declarations, got %q", name)
 		}
 		if err := p.parseFunc(); err != nil {
 			return err
@@ -1313,7 +1316,7 @@ func (p *parser) parseFunc() error {
 	}
 	fd := &funcDef{name: name}
 	p.skipSpace()
-	// 泛型：func<T,...>（v1 跳过类型参数，类型擦除按 int）
+	// 泛型：fn<T,...>（v1 跳过类型参数，类型擦除按 int）
 	if p.pos < len(p.src) && p.src[p.pos] == '<' {
 		for p.pos < len(p.src) && p.src[p.pos] != '>' {
 			p.pos++

@@ -236,7 +236,7 @@ func (p *parser) parseProgram() (*Program, error) {
 		switch p.cur().Kind {
 		case TFunc:
 			if prog.kindSet {
-				return nil, p.errf(p.cur(), "program 预制宏必须写在程序末尾（节点接入先后顺序），%s 声明不得在其后", "func")
+				return nil, p.errf(p.cur(), "program 预制宏必须写在程序末尾（节点接入先后顺序），%s 声明不得在其后", "fn")
 			}
 			fn, err := p.parseFunc()
 			if err != nil {
@@ -409,7 +409,10 @@ func (p *parser) parseProgram() (*Program, error) {
 					continue
 				}
 			}
-			return nil, p.errf(p.cur(), "expected a top-level declaration (func/struct/impl/interface/program/import/pub), got %s", p.cur().Kind)
+			if p.curIs(TIdent) && p.cur().Text == "func" {
+				return nil, p.errf(p.cur(), "函数声明关键字是 fn：func main(...) 应写为 fn main(...)")
+			}
+			return nil, p.errf(p.cur(), "expected a top-level declaration (fn/struct/impl/interface/program/import/pub), got %s", p.cur().Kind)
 		}
 	}
 	return prog, nil
@@ -464,7 +467,7 @@ func (p *parser) parseFunc() (*FuncDecl, error) {
 	} else if name.Text == "main" {
 		fn.Ret = "void"
 	} else {
-		return nil, p.errf(p.cur(), "函数必须声明返回类型：func %s(...) 返回类型 { ... }", name.Text)
+		return nil, p.errf(p.cur(), "函数必须声明返回类型：fn %s(...) 返回类型 { ... }", name.Text)
 	}
 	startTok := p.cur() // parseBlock 前：'{' 之后第一个 token（起始行）
 	body, err := p.parseBlock()
@@ -605,9 +608,9 @@ func (p *parser) parseStructName(sd *StructDecl) error {
 	return nil
 }
 
-// parseMethodSig parses an interface method signature: "func name(params) Ret;".
+// parseMethodSig parses an interface method signature: "fn name(params) Ret;".
 func (p *parser) parseMethodSig() (MethodSig, error) {
-	kw, err := p.expect(TFunc, "'func'")
+	kw, err := p.expect(TFunc, "'fn'")
 	if err != nil {
 		return MethodSig{}, err
 	}

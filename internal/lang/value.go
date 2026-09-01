@@ -355,8 +355,8 @@ var globalTaskm = &TaskManager{}
 // FuncValue is a first-class function reference (for taskm::spawn etc.).
 type FuncValue struct{ fn *Func }
 
-func (f *FuncValue) TypeName() string { return "func" }
-func (f *FuncValue) String() string   { return "<func " + f.fn.Name + ">" }
+func (f *FuncValue) TypeName() string { return "fn" }
+func (f *FuncValue) String() string   { return "<fn " + f.fn.Name + ">" }
 
 // Task 是线程（taskm）的执行上下文：done = 线程是否空闲。
 type Task struct {

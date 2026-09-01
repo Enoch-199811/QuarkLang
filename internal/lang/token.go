@@ -69,7 +69,7 @@ const (
 
 var tokenNames = [...]string{
 	"end of file", "identifier", "int literal", "float literal", "string literal",
-	"'func'", "'struct'", "'impl'", "'interface'", "'out'", "'return'", "'if'", "'else'",
+	"'fn'", "'struct'", "'impl'", "'interface'", "'out'", "'return'", "'if'", "'else'",
 	"'while'", "'for'", "'in'", "'true'", "'false'",
 	"'('", "')'", "'{'", "'}'", "'['", "']'", "';'", "','", "'.'", "':'", "'::'", "'@'",
 	"'='", "'+'", "'-'", "'*'", "'/'", "'%'", "'!'", "'=='", "'!='", "'<'", "'<='", "'>'", "'>='", "'&&'", "'||'",

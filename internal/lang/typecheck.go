@@ -73,7 +73,7 @@ var kindName = map[tKind]string{
 	tNil: "nil", tAny: "interface{}", tFuncBuffer: "FuncBuffer",
 	tIOStream: "IOStream", tInputStream: "InputStream", tOutputStream: "OutputStream",
 	tChannel: "Channel", tTask: "Task", tMemorize: "memorize", tMemory: "memory",
-	tFunc: "func", tStruct: "struct", tTaskm: "taskm", tPtr: "ptr", tCopyd: "Copyd", tNull: "null", tTypeVar: "typevar",
+	tFunc: "fn", tStruct: "struct", tTaskm: "taskm", tPtr: "ptr", tCopyd: "Copyd", tNull: "null", tTypeVar: "typevar",
 }
 
 func (t *Type) String() string {
@@ -87,9 +87,9 @@ func (t *Type) String() string {
 		return "HashTable<" + t.Key.String() + ", " + t.Val.String() + ">"
 	case tFunc:
 		if t.FName != "" {
-			return "func " + t.FName
+			return "fn " + t.FName
 		}
-		return "func"
+		return "fn"
 	case tStruct:
 		if len(t.Args) > 0 {
 			parts := make([]string, len(t.Args))
@@ -237,8 +237,6 @@ func parseTypeStr(s string) (*Type, error) {
 		return tMemoryV, nil
 	case "taskm":
 		return tTaskmV, nil
-	case "func":
-		return mkFunc(""), nil
 	case "List", "Array":
 		e, err := elem()
 		if err != nil {
@@ -355,7 +353,7 @@ type checker struct {
 	aliases    map[string]string // type <类型> 名字; 类型别名
 	curRet     *Type
 	curSubst   map[string]*Type // 泛型方法体/调用点的类型参数替换
-	typeVars   map[string]bool  // 泛型函数当前作用域的类型参数（func<T,...>）
+	typeVars   map[string]bool  // 泛型函数当前作用域的类型参数（fn<T,...>）
 }
 
 // Typecheck 执行 §11.1 的全部编译期严格检查。
@@ -588,8 +586,6 @@ func (c *checker) substType(s string, subst map[string]*Type, pos Pos) (*Type, e
 		return tMemoryV, nil
 	case "taskm":
 		return tTaskmV, nil
-	case "func":
-		return mkFunc(""), nil
 	case "List", "Array":
 		e := tAnyV
 		if inner != "" {
@@ -652,7 +648,7 @@ func (c *checker) substType(s string, subst map[string]*Type, pos Pos) (*Type, e
 	if alias, ok := c.aliases[base]; ok {
 		return c.substType(alias, subst, pos)
 	}
-	// 泛型函数的类型变量（func<T,...>）：T 在作用域内即为类型变量
+	// 泛型函数的类型变量（fn<T,...>）：T 在作用域内即为类型变量
 	if c.typeVars[base] {
 		return &Type{Kind: tTypeVar, FName: base}, nil
 	}
@@ -1705,7 +1701,7 @@ func (c *checker) inferArgs(args []Expr, sc *cScope) ([]*Type, error) {
 	return out, nil
 }
 
-// inferGenSubst 从实参推断泛型函数的类型参数（func<T,...>）。
+// inferGenSubst 从实参推断泛型函数的类型参数（fn<T,...>）。
 func (c *checker) inferGenSubst(fn *Func, args []Expr, sc *cScope) (map[string]*Type, error) {
 	argTys, err := c.inferArgs(args, sc)
 	if err != nil {

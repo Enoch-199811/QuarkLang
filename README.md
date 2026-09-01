@@ -17,7 +17,7 @@
 - **try/catch**：`try { } catch (e void) { }`（除零等错误可捕获）；
 - **void = 空接口**：任意值可赋；
 - **struct / impl / interface**：`type struct { a int; } Point;`、`impl Point { fn sum(self) int {...} }`、`.{3, 5}` 字面量、`self.a` 字段访问；
-- **泛型**：`func<T>` / `f<int>(x)`（类型擦除，编译可用）；
+- **泛型**：`fn f<T>(...)` / `f<int>(x)`（类型擦除，编译可用）；
 - **函数引用**：`type function<int, int> F;`、函数作为值传递与调用；
 - **指针 / 堆申请**：`pointer <T>` 修饰、`new <type>[size]` 堆上申请（非法大小 `badAlloc`）、空指针解引用 `NullPointerError`；
 - **签名**：`f(args) @mb(prefix)` ≡ `mb.call(prefix)(.{in, out})`——记忆化/包装；

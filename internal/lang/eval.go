@@ -398,7 +398,7 @@ func runWithInterp(prog *Program, filename string, args []string, stdin io.Reade
 	}
 	mainFn, ok := in.fns["main"]
 	if !ok {
-		return nil, fmt.Errorf("CompileError: no main function found (expected: func main(io IOStream, ...))")
+		return nil, fmt.Errorf("CompileError: no main function found (expected: fn main(io IOStream, ...))")
 	}
 	ioObj := &IOStream{In: stdin, Out: stdout, rd: bufio.NewReader(stdin)}
 	env := envTable()

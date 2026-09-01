@@ -28,7 +28,7 @@ func ExportLibrary(prog *Program, outPath string) error {
 			params = append(params, p.Name+" "+p.Type)
 		}
 		var sb strings.Builder
-		sb.WriteString("func ")
+		sb.WriteString("fn ")
 		if len(fn.TypeParams) > 0 {
 			sb.WriteString("<" + strings.Join(fn.TypeParams, ", ") + "> ")
 		}

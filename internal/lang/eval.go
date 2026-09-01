@@ -272,6 +272,7 @@ type StructDef struct {
 	Name       string
 	TypeParams []string
 	Types      map[string]string // 成员名 → 类型注解
+	TypesOrder []string          // 字段声明顺序（位置 .{} 绑定用）
 }
 
 // InterfaceDef is a registered interface declaration.
@@ -349,6 +350,7 @@ func runWithInterp(prog *Program, filename string, args []string, stdin io.Reade
 		def := &StructDef{Name: s.Name, Types: map[string]string{}}
 		for _, m := range s.Members {
 			def.Types[m.Name] = m.Type
+			def.TypesOrder = append(def.TypesOrder, m.Name)
 		}
 		in.structs[s.Name] = def
 	}
@@ -713,12 +715,23 @@ func (in *interp) evalExpr(e Expr, sc *scope, ctx *execCtx) (Value, error) {
 			st = "."
 		}
 		sv := &StructValue{SType: st, Fields: map[string]Value{}}
+		// 位置形式（Name 空）：按目标类型字段顺序绑定（与编译器一致）
+		var fieldNames []string
+		if sd, ok := in.structs[st]; ok {
+			fieldNames = sd.TypesOrder
+		}
+		idx := 0
 		for _, f := range x.Fields {
 			v, err := in.evalExpr(f.X, sc, ctx)
 			if err != nil {
 				return nil, err
 			}
-			sv.Fields[f.Name] = v
+			name := f.Name
+			if name == "" && idx < len(fieldNames) {
+				name = fieldNames[idx]
+			}
+			idx++
+			sv.Fields[name] = v
 		}
 		return sv, nil
 	case *Ident:

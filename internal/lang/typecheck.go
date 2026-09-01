@@ -386,6 +386,9 @@ func Typecheck(prog *Program) error {
 		}
 		def := &StructDef{Name: s.Name, TypeParams: s.TypeParams, Types: map[string]string{}}
 		for _, m := range s.Members {
+			def.TypesOrder = append(def.TypesOrder, m.Name)
+		}
+		for _, m := range s.Members {
 			def.Types[m.Name] = m.Type
 		}
 		c.structs[s.Name] = def
@@ -842,10 +845,14 @@ func (c *checker) checkStmt(st Stmt, sc *cScope) error {
 				if len(sl.Fields) != len(def.Types) {
 					return c.errf(s.Pos, "TypeError: %s 需要 %d 个字段，字面量给了 %d", typ.FName, len(def.Types), len(sl.Fields))
 				}
-				for _, f := range sl.Fields {
-					ft, has := def.Types[f.Name]
+				for i, f := range sl.Fields {
+					fname := f.Name
+					if fname == "" && i < len(def.TypesOrder) {
+						fname = def.TypesOrder[i]
+					}
+					ft, has := def.Types[fname]
 					if !has {
-						return c.errf(s.Pos, "TypeError: %s 没有字段 %q", typ.FName, f.Name)
+						return c.errf(s.Pos, "TypeError: %s 没有字段 %q", typ.FName, fname)
 					}
 					fv, err := c.infer(f.X, sc)
 					if err != nil {

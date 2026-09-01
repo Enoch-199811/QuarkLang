@@ -239,12 +239,12 @@ struct {
     x int;
 } Bad;
 
-impl Sign {
+impl Bad Sign {
     func new() Bad {
         b Bad;
         return b;
     }
-} Bad;
+}
 
 func main(io IOStream) {
     b Bad = Bad::new();

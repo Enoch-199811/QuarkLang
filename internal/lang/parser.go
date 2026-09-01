@@ -416,9 +416,11 @@ func (p *parser) parseProgram() (*Program, error) {
 }
 
 func (p *parser) parseFunc() (*FuncDecl, error) {
-	kw, err := p.expect(TFunc, "'func'")
-	if err != nil {
-		return nil, err
+	kw := p.cur()
+	if p.curIs(TFunc) || (p.curIs(TIdent) && p.cur().Text == "fn") {
+		p.advance()
+	} else {
+		return nil, p.errf(p.cur(), "expected 'func'")
 	}
 	var typeParams []string
 	if p.curIs(TLt) {
@@ -725,7 +727,11 @@ func (p *parser) parseImpl() (*ImplDecl, error) {
 		im.TypeParams = params
 	}
 	if p.curIs(TIdent) {
-		im.Iface = p.advance().Text
+		// 编译器风格：impl <Type> [<Iface>] { ... }（Type 在块前，可选接口）
+		im.Type = p.advance().Text
+		if p.curIs(TIdent) {
+			im.Iface = p.advance().Text
+		}
 	}
 	if _, err := p.expect(TLBrace, "'{"); err != nil {
 		return nil, err
@@ -741,13 +747,12 @@ func (p *parser) parseImpl() (*ImplDecl, error) {
 		im.Methods = append(im.Methods, fn)
 	}
 	p.advance() // '}'
-	typ, err := p.expectIdent("type name")
-	if err != nil {
-		return nil, err
+	// 兼容旧语法 impl { ... } Type;（Type 在块后）；分号可选（新语法直接换行）
+	if p.curIs(TIdent) {
+		im.Type = p.advance().Text
 	}
-	im.Type = typ.Text
-	if _, err := p.expect(TSemi, "';'"); err != nil {
-		return nil, err
+	if p.curIs(TSemi) {
+		p.advance()
 	}
 	return im, nil
 }
@@ -1284,18 +1289,22 @@ func (p *parser) parsePrimary() (Expr, error) {
 		lit := &StructLit{Pos: pos}
 		if !p.curIs(TRBrace) {
 			for {
-				name, err := p.expectMemberName("field name")
-				if err != nil {
-					return nil, err
+				// 位置形式 .{v1, v2}（与编译器一致）：冒号后跟值的是命名形式，否则位置
+				if p.peekIs(TColon) {
+					name := p.advance()
+					p.advance() // :
+					v, err := p.parseExpr()
+					if err != nil {
+						return nil, err
+					}
+					lit.Fields = append(lit.Fields, StructLitField{Name: name.Text, X: v})
+				} else {
+					v, err := p.parseExpr()
+					if err != nil {
+						return nil, err
+					}
+					lit.Fields = append(lit.Fields, StructLitField{Name: "", X: v})
 				}
-				if _, err := p.expect(TColon, "':'"); err != nil {
-					return nil, err
-				}
-				v, err := p.parseExpr()
-				if err != nil {
-					return nil, err
-				}
-				lit.Fields = append(lit.Fields, StructLitField{Name: name.Text, X: v})
 				if p.curIs(TComma) {
 					p.advance()
 					continue

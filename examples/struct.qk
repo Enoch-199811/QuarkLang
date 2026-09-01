@@ -1,43 +1,6 @@
-// 用户自定义 struct / interface / impl（spec §7）+ 用户自定义 Sign（spec §6.3 参考实现）
-interface {
-    func call(prefix P, fb FuncBuffer) FuncBuffer;
-} Sign<P>;
-
-struct {
-    pairsParamToResult HashTable<List<interface{}>, List<interface{}>>;
-} LocalMemorize;
-
-impl Sign {
-    func call(prefix LocalMemorize, fb FuncBuffer) FuncBuffer {
-        key List<interface{}> = fb.head;      // 缓存键 = 参数列表（head → tail 映射）
-        if (prefix.pairsParamToResult.contains(key)) {
-            fb.tail.appendAll(prefix.pairsParamToResult.get(key));
-            fb.log.append("cache hit");
-        } else {
-            fb.execute();
-            prefix.pairsParamToResult.put(key, fb.tail);
-            fb.log.append("cache miss");
-        }
-        return fb;
-    }
-    func new() LocalMemorize {
-        m LocalMemorize;
-        m.pairsParamToResult = HashTable::new();
-        return m;
-    }
-} LocalMemorize;
-
-func expensive(n int) {
-    out n * n;
-}
-
+type struct { a int; b int; } Point;
+impl Point { fn sum(self Point) int { return self.a + self.b; } }
 func main(io IOStream) {
-    mb LocalMemorize = LocalMemorize::new();
-    fb FuncBuffer = expensive(41) @LocalMemorize(mb);
-    io.println(*fb.tail);         // 1681（首次：执行并缓存）
-    fb2 FuncBuffer = expensive(41) @LocalMemorize(mb);
-    io.println(*fb2.tail);        // 1681（缓存命中，函数体未再执行）
-    while (fb2.log.head() != fb2.log.tail()) {
-        io.println(fb2.log.next());   // cache hit
-    }
+    p Point = .{3, 5};
+    io.println(p.sum());
 }

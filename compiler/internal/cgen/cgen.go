@@ -299,13 +299,15 @@ func (e *emitter) emitStmt(s stmt) {
 				av, _ := e.compileExpr(a)
 				argRegs = append(argRegs, av)
 			}
-			line := "  " + e.newReg() + " = tail call i32 @" + c.call.name
+			r := e.newReg()
+			e.body.WriteString(r)
+			e.body.WriteString(" = tail call i32 @" + c.call.name)
 			if len(argRegs) > 0 {
-				line += "(i32 " + strings.Join(argRegs, ", i32 ") + ")"
+				e.body.WriteString("(i32 " + strings.Join(argRegs, ", i32 ") + ")\n")
+			} else {
+				e.body.WriteString("()\n")
 			}
-			line += "\n"
-			e.body.WriteString(line)
-			e.emitInstr("ret i32 %s", strings.Fields(line)[0])
+			e.emitInstr("ret i32 %s", r)
 			e.funcReturned = true
 			break
 		}
@@ -709,13 +711,14 @@ func (e *emitter) compileExpr(x *expr) (string, byte) {
 					av, _ := e.compileExpr(a)
 					args = append(args, av)
 				}
-				line := "  " + e.newReg() + " = call i32 @" + fname + "(" + typ + " " + sv
+				r := e.newReg()
+				e.body.WriteString(r)
+				e.body.WriteString(" = call i32 @" + fname + "(" + typ + " " + sv)
 				for _, a := range args {
-					line += ", i32 " + a
+					e.body.WriteString(", i32 " + a)
 				}
-				line += ")\n"
-				e.body.WriteString(line)
-				return strings.Fields(line)[0], 'i'
+				e.body.WriteString(")\n")
+				return r, 'i'
 			}
 		}
 		// channel 变量方法：c.send(v) / c.recv()
@@ -880,13 +883,15 @@ func (e *emitter) compileExpr(x *expr) (string, byte) {
 			v, _ := e.compileExpr(a)
 			argRegs = append(argRegs, v)
 		}
-		line := "  " + e.newReg() + " = call i32 @" + x.call.name
+		r := e.newReg()
+		e.body.WriteString(r)
+		e.body.WriteString(" = call i32 @" + x.call.name)
 		if len(argRegs) > 0 {
-			line += "(i32 " + strings.Join(argRegs, ", i32 ") + ")"
+			e.body.WriteString("(i32 " + strings.Join(argRegs, ", i32 ") + ")\n")
+		} else {
+			e.body.WriteString("()\n")
 		}
-		line += "\n"
-		e.body.WriteString(line)
-		return strings.Fields(line)[0], 'i' // 返回 %N（call 结果寄存器）
+		return r, 'i' // 返回 %N（call 结果寄存器）
 	case kBin:
 		// String 拼接："a" + "b" → ql_strcat（运行时）
 		if x.op == "+" && (x.l.kind == kString || x.r.kind == kString || x.l.kind == kIdent && e.vars[x.l.s].isStr || x.r.kind == kIdent && e.vars[x.r.s].isStr) {

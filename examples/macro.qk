@@ -1,0 +1,4 @@
+macro { #when(run) io.println("macro-ok"); } { io.println("body"); }
+func main(io IOStream) {
+    io.println(42);
+}

@@ -1,0 +1,6 @@
+func ident(n int) int {
+    return n * 3 + 1;
+}
+func main(io IOStream) {
+    io.println(sum(ident, 0, 100000000));
+}

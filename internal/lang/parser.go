@@ -3,6 +3,7 @@ package lang
 import (
 	"crypto/sha256"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 )
@@ -33,6 +34,87 @@ func Parse(toks []Token) (*Program, error) {
 // (spec §11.1: strict checks run at compile time).
 // compileCache：进程内增量编译缓存（源码 sha256 → 已编译 Program）。
 var compileCache sync.Map
+
+// walkCallRefs 遍历语句/表达式，解析 CallExpr.FnIdx（Ident 且命中函数表）。
+func walkCallRefs(s interface{}, idx map[string]int) {
+	walkNode(s, func(e Expr) {
+		if c, ok := e.(*CallExpr); ok {
+			if id, ok := c.Fn.(*Ident); ok {
+				c.FnIdx = -1
+				if i, ok := idx[id.Name]; ok {
+					c.FnIdx = i
+				}
+			}
+		}
+	})
+}
+
+func walkNode(n interface{}, visit func(Expr)) {
+	// 判 nil（含具体类型 nil 指针，如 (*Block)(nil)）
+	if n == nil {
+		return
+	}
+	if rv := reflect.ValueOf(n); rv.Kind() == reflect.Ptr && rv.IsNil() {
+		return
+	}
+	if rv := reflect.ValueOf(n); rv.Kind() == reflect.Ptr && rv.IsNil() {
+		return
+	}
+	switch t := n.(type) {
+	case Expr:
+		visit(t)
+		if c, ok := t.(*CallExpr); ok {
+			for _, a := range c.Args {
+				walkNode(a, visit)
+			}
+			walkNode(c.Fn, visit)
+		}
+		if b, ok := t.(*BinOp); ok {
+			walkNode(b.L, visit)
+			walkNode(b.R, visit)
+		}
+	case *Block:
+		for _, s := range t.Stmts {
+			walkNode(s, visit)
+		}
+	case *DeclStmt:
+		walkNode(t.Init, visit)
+	case *AssignStmt:
+		walkNode(t.Target, visit)
+		walkNode(t.X, visit)
+	case *ReturnStmt:
+		walkNode(t.X, visit)
+	case *ExprStmt:
+		walkNode(t.X, visit)
+	case *IfStmt:
+		walkNode(t.Cond, visit)
+		walkNode(t.Then, visit)
+		walkNode(t.Else, visit)
+	case *WhileStmt:
+		walkNode(t.Cond, visit)
+		walkNode(t.Body, visit)
+	case *ForStmt:
+		walkNode(t.Iter, visit)
+		walkNode(t.Body, visit)
+	case *TryStmt:
+		for _, s := range t.Try.Stmts {
+			walkNode(s, visit)
+		}
+		for _, s := range t.Catch.Stmts {
+			walkNode(s, visit)
+		}
+	}
+}
+
+// mainBody 返回主函数体（无 main 则空）。
+func mainBody(prog *Program) *Block {
+	for _, f := range prog.Funcs {
+		if f.Name == "main" {
+			return f.Body
+		}
+	}
+	return &Block{}
+}
 
 func Compile(src string) (*Program, error) {
 	h := sha256.Sum256([]byte(src))
@@ -72,6 +154,17 @@ func compileSlow(src string) (*Program, error) {
 	if err := Typecheck(prog); err != nil {
 		return nil, err
 	}
+	// 编译期解析函数调用索引（eval 免 map 查找）
+	prog.FnList = make([]*FuncDecl, 0, len(prog.Funcs))
+	prog.FnIndex = map[string]int{}
+	for i, f := range prog.Funcs {
+		prog.FnList = append(prog.FnList, f)
+		prog.FnIndex[f.Name] = i
+	}
+	for _, f := range prog.Funcs {
+		walkCallRefs(f.Body, prog.FnIndex)
+	}
+	walkCallRefs(mainBody(prog), prog.FnIndex)
 	return prog, nil
 }
 

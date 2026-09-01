@@ -302,8 +302,9 @@ type interp struct {
 	taskMu      sync.Mutex
 	nextPid     int
 	mem         *MemoryManager
-	randState   uint64 // rand() LCG 状态（确定性伪随机）
-	globalScope *scope // 全局作用域（常量预声明一次）
+	randState   uint64  // rand() LCG 状态（确定性伪随机）
+	globalScope *scope  // 全局作用域（常量预声明一次）
+	fnList      []*Func // 函数表（CallExpr.FnIdx 直取，免 map）
 }
 
 // Run executes prog. args are command-line arguments for main(); stdin/stdout
@@ -336,6 +337,10 @@ func runWithInterp(prog *Program, filename string, args []string, stdin io.Reade
 			return nil, fmt.Errorf("CompileError: duplicate function %q", f.Name)
 		}
 		in.fns[f.Name] = &Func{Name: f.Name, Params: f.Params, Ret: f.Ret, Body: f.Body, Pos: f.Pos}
+	}
+	// 函数表（FnIdx 索引，顺序与 FnList 一致——fns 填充后）
+	for _, fd := range prog.FnList {
+		in.fnList = append(in.fnList, in.fns[fd.Name])
 	}
 	for _, s := range prog.Structs {
 		if _, dup := in.structs[s.Name]; dup {

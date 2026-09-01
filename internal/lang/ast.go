@@ -14,6 +14,8 @@ type TypeAlias struct {
 }
 
 type Program struct {
+	FnList      []*FuncDecl // 函数表（eval 直取索引免 map）
+	FnIndex     map[string]int
 	Funcs       []*FuncDecl
 	Structs     []*StructDecl
 	Interfaces  []*InterfaceDecl
@@ -223,10 +225,11 @@ type UnOp struct {
 	Pos Pos
 }
 type CallExpr struct {
-	Fn   Expr
-	Args []Expr
-	Sign *SignCall
-	Pos  Pos
+	Fn    Expr
+	Args  []Expr
+	Sign  *SignCall
+	Pos   Pos
+	FnIdx int // 编译期解析的函数索引（-1 = 未解析/变量调用）；eval 直取 FnList 免 map
 }
 type SignCall struct {
 	Name string

@@ -1171,7 +1171,7 @@ func (p *parser) parsePostfix() (Expr, error) {
 				if err != nil {
 					return nil, err
 				}
-				x = &CallExpr{Fn: &MemberExpr{X: x, Name: name.Text, Pos: pos}, Args: args, Pos: pos}
+				x = &CallExpr{Fn: &MemberExpr{X: x, Name: name.Text, Pos: pos}, Args: args, Pos: pos, FnIdx: -1}
 			} else {
 				x = &MemberExpr{X: x, Name: name.Text, Pos: pos}
 			}
@@ -1181,7 +1181,7 @@ func (p *parser) parsePostfix() (Expr, error) {
 			if err != nil {
 				return nil, err
 			}
-			x = &CallExpr{Fn: x, Args: args, Pos: Pos{Line: lp.Line, Col: lp.Col}}
+			x = &CallExpr{Fn: x, Args: args, Pos: Pos{Line: lp.Line, Col: lp.Col}, FnIdx: -1}
 		case p.curIs(TLBracket):
 			p.advance()
 			idx, err := p.parseExpr()

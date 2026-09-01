@@ -28,11 +28,12 @@ type Program struct {
 	Src         string   // 原始源码（库导出时按函数体行区间切片）
 }
 
-// MacroDef 是 macro {模式} {主体} 定义（模式/主体均为 token 序列）。
+// MacroDef 是 #macro name (参数...) { 主体 } 定义（命名参数宏，参数按名替换）。
 type MacroDef struct {
-	Pattern []Token
-	Body    []Token
-	Pos     Pos
+	Name   string
+	Params []string
+	Body   []Token
+	Pos    Pos
 }
 
 // FuncDecl is a top-level function declaration. Ret is the optional return

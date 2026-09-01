@@ -1,4 +1,10 @@
-macro { #when(run) io.println("macro-ok"); } { io.println("body"); }
+#macro add (a, b) {
+    #when (run) {
+        a + b
+    }
+}
+
 fn main(io IOStream) {
-    io.println(42);
+    io.println(add(10, 32));   // () 调用
+    io.println(add[20, 22]);   // [] 调用
 }

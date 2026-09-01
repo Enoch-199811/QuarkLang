@@ -141,7 +141,7 @@ fn main(io IOStream) {
 	}
 }
 
-// ============ 签名（v2）：f(args) @mb() ============
+// ============ 签名（v2）：f(args) @instance() ============
 
 func TestMemorizeSignature(t *testing.T) {
 	out, err := runSrc(t, `
@@ -542,16 +542,16 @@ func TestIORedirect(t *testing.T) {
 
 // ============ 宏系统 ============
 
-// 自定义宏：模式 + ... 通配捕获，#when(run) 插入捕获内容
-func TestMacroInsertRun(t *testing.T) {
-	out, err := runSrc(t, `macro {emit ...} {
+// 命名宏：#macro name (参数) { 主体 }，调用 name(args)，参数按名替换
+func TestMacroNamedParams(t *testing.T) {
+	out, err := runSrc(t, `#macro emit (expr) {
     #when (run) {
-        #insert(#ast(...))
+        expr
     }
 }
 
 fn main(io IOStream) {
-    emit io.println("hello from macro");
+    emit(io.println("hello from macro"));
 }`)
 	if err != nil {
 		t.Fatal(err)
@@ -563,15 +563,15 @@ fn main(io IOStream) {
 
 // #when(compile) 块在运行态被丢弃
 func TestMacroWhenCompileDropped(t *testing.T) {
-	out, err := runSrc(t, `macro {only ...} {
+	out, err := runSrc(t, `#macro only (x) {
     #when (compile) { io.println("COMPILE-ONLY"); }
     #when (run) {
-        #insert(#ast(...))
+        x
     }
 }
 
 fn main(io IOStream) {
-    only io.println("run-line");
+    only(io.println("run-line"));
 }`)
 	if err != nil {
 		t.Fatal(err)
@@ -583,21 +583,21 @@ fn main(io IOStream) {
 
 // #error 在选中的预处理分支中直接报错
 func TestMacroErrorDirective(t *testing.T) {
-	_, err := runSrc(t, `macro {bad ...} {
+	_, err := runSrc(t, `#macro bad (x) {
     #when (run) {
         #error("cannot do this at run time")
     }
 }
 
 fn main(io IOStream) {
-    bad io.println("x");
+    bad(io.println("x"));
 }`)
 	if err == nil || !strings.Contains(err.Error(), "cannot do this at run time") {
 		t.Fatalf("got %v", err)
 	}
 }
 
-// program library; 编译为库，运行时报错
+
 func TestProgramLibraryNotRunnable(t *testing.T) {
 	_, err := runSrc(t, `fn main(io IOStream) {
     io.println("never");
@@ -651,20 +651,38 @@ pub struct {
 	}
 }
 
-// 宏模式内不允许嵌套大括号
-func TestMacroNoNestedBraceInPattern(t *testing.T) {
-	_, err := Compile(`macro {oops {x}} {
-    #when (run) { }
+
+// 参数列表与调用分隔符 () [] {} 可互换；参数个数不限但调用必须匹配
+func TestMacroDelimitersAndArity(t *testing.T) {
+	out, err := runSrc(t, `#macro add [a, b] {
+    #when (run) {
+        a + b
+    }
 }
+
 fn main(io IOStream) {
-    io.println(1);
+    io.println(add(10, 32));
+    io.println(add{1, 2});
 }`)
-	if err == nil || !strings.Contains(err.Error(), "不能再嵌套大括号") {
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "42\n3\n" {
+		t.Fatalf("got %q", out)
+	}
+	_, err = runSrc(t, `#macro two (a, b) {
+    a
+}
+
+fn main(io IOStream) {
+    two(1);
+}`)
+	if err == nil || !strings.Contains(err.Error(), "需要 2 个参数") {
 		t.Fatalf("got %v", err)
 	}
 }
 
-// delete variable; —— 回收内存于 __delete__()，block 消除日志
+
 func TestDeleteReclaimsBlock(t *testing.T) {
 	prog, err := Compile(`fn main(io IOStream) {
     l List<int> = [1, 2, 3];

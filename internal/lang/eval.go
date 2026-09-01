@@ -484,7 +484,8 @@ func (in *interp) execute(ctx *execCtx) error {
 	}
 	ctx.executed = true
 
-	sc := newScope(in.globalScope) // 全局作用域（DynamicStackAndHeap 等预声明一次，outer 链可见）
+	sc := &ctx.sc // 复用 ctx 内嵌作用域（免每次调用堆分配）
+	sc.outer = in.globalScope // 全局作用域（DynamicStackAndHeap 等预声明一次，outer 链可见）
 	fn := ctx.Fn
 	// 参数绑定到线性槽位：参数名缓存共享（零分配），值直接复用 ctx.Args
 	args := ctx.Args
@@ -495,7 +496,7 @@ func (in *interp) execute(ctx *execCtx) error {
 	}
 	sc.setParams(fn.ParamNames(), args)
 	if err := in.execBlock(fn.Body, sc, ctx); err != nil {
-		if errors.Is(err, errReturn) {
+		if err == errReturn {
 			return nil
 		}
 		return err
@@ -554,7 +555,7 @@ func (in *interp) execStmt(st Stmt, sc *scope, ctx *execCtx) error {
 		// try/catch：try 块出错（非 return）时把错误装入 catch 变量（interface{}），执行 catch 块
 		err := in.execBlock(s.Try, sc, ctx)
 		if err != nil {
-			if errors.Is(err, errReturn) {
+			if err == errReturn {
 				return err
 			}
 			inner := newScope(sc)
@@ -959,8 +960,8 @@ func (in *interp) evalCall(c *CallExpr, sc *scope, ctx *execCtx) (Value, error) 
 		if len(argVals) != len(fn.Params) {
 			return nil, &RunError{Msg: fmt.Sprintf("CompileError: %s expects %d args, got %d", fn.Name, len(fn.Params), len(argVals)), Pos: id.Pos, Ctx: ctx}
 		}
-		// v2 签名：f(args) @mb(prefix) ≡ mb.call(prefix)(.{in, out})
-		// 1) mb 是变量（Sign 实例）；2) prefix 中放被包装的原函数 fn；3) 记录 .{in: List(args), out: nil}
+		// v2 签名：f(args) @instance(prefix) ≡ instance.call(prefix)(.{in, out})
+		// 1) instance 是变量（Sign 实例，名字任意）；2) prefix 中放被包装的原函数 fn；3) 记录 .{in: List(args), out: nil}
 		mbv, err := in.evalExpr(&Ident{Name: c.Sign.Name, Pos: c.Pos}, sc, ctx)
 		if err != nil {
 			return nil, err
@@ -1007,6 +1008,10 @@ func (in *interp) evalCall(c *CallExpr, sc *scope, ctx *execCtx) (Value, error) 
 	if err != nil {
 		return nil, err
 	}
+	// FnIdx 编译期已解析：直取 fnList，免 map 哈希
+	if c.FnIdx >= 0 && c.FnIdx < len(in.fnList) {
+		return in.callFunc(in.fnList[c.FnIdx], argVals, id.Pos)
+	}
 	if fn, ok := in.fns[id.Name]; ok {
 		return in.callFunc(fn, argVals, id.Pos)
 	}
@@ -1025,8 +1030,10 @@ func (in *interp) evalCall(c *CallExpr, sc *scope, ctx *execCtx) (Value, error) 
 // callFunc：v2 —— 函数调用返回 return 的结果（log 结束则返回 nil）。
 func (in *interp) callFunc(fn *Func, args []Value, pos Pos) (Value, error) {
 	// 内置函数引用（如 sum 的生成器 rand）：仅当是伪函数（无 Body）时——用户同名方法不被劫持
-	if b, ok := in.builtins[fn.Name]; ok && fn.Body == nil {
-		return b(args, pos, nil)
+	if fn.Body == nil {
+		if b, ok := in.builtins[fn.Name]; ok {
+			return b(args, pos, nil)
+		}
 	}
 	if len(args) != len(fn.Params) {
 		return nil, &RunError{Msg: fmt.Sprintf("CompileError: %s expects %d args, got %d", fn.Name, len(fn.Params), len(args)), Pos: pos}
@@ -1283,15 +1290,15 @@ func (in *interp) callMethod(obj Value, name string, args []Value, ctx *execCtx,
 	case *MemorizeBuffer:
 		if name == "call" {
 			if len(args) != 2 {
-				return nil, wantArity("mb.call", 2, len(args), pos, ctx)
+				return nil, wantArity("call", 2, len(args), pos, ctx)
 			}
 			pref, ok := args[0].(*StructValue)
 			if !ok {
-				return nil, &RunError{Msg: "TypeError: mb.call 第一参数必须是 prefix 记录", Pos: pos, Ctx: ctx}
+				return nil, &RunError{Msg: "TypeError: call 第一参数必须是 prefix 记录", Pos: pos, Ctx: ctx}
 			}
 			recv, ok := args[1].(*StructValue)
 			if !ok {
-				return nil, &RunError{Msg: "TypeError: mb.call 第二参数必须是 .{in,out} 记录", Pos: pos, Ctx: ctx}
+				return nil, &RunError{Msg: "TypeError: call 第二参数必须是 .{in,out} 记录", Pos: pos, Ctx: ctx}
 			}
 			return in.memorizeBufferCall(o, pref, recv, pos, ctx)
 		}

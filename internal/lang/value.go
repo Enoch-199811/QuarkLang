@@ -256,6 +256,7 @@ type execCtx struct {
 	result   Value
 	executed bool
 	pos      Pos
+	sc       scope // 函数执行作用域（复用，免每次调用堆分配）
 }
 
 // execCtxPool 复用函数调用上下文（高计算场景：减少每次调用的堆分配）。
@@ -263,36 +264,31 @@ var execCtxPool = sync.Pool{
 	New: func() interface{} { return &execCtx{Log: NewList()} },
 }
 
-// argsPool 复用调用参数切片（小切片：避免每次调用 makeslice）。
-var argsPool = sync.Pool{
-	New: func() interface{} { return make([]Value, 0, 8) },
-}
 
+// NewExecCtx 接管调用参数切片所有权（evalArgs 每次新建，免复制）。
 func NewExecCtx(fn *Func, args []Value, pos Pos) *execCtx {
-	var items []Value
-	if p := argsPool.Get().([]Value); cap(p) >= len(args) {
-		items = p[:len(args)]
-	} else {
-		items = make([]Value, len(args))
-	}
-	copy(items, args)
 	ctx := execCtxPool.Get().(*execCtx)
 	ctx.Fn = fn
-	ctx.Args = items
+	ctx.Args = args
 	ctx.pos = pos
 	ctx.result = nil
 	ctx.executed = false
 	ctx.Log.reset()
+	ctx.sc.outer = nil
+	ctx.sc.vars = nil
+	ctx.sc.slots = nil
+	ctx.sc.paramNames = nil
 	return ctx
 }
 
 // putExecCtx 归还执行上下文（含参数切片）到池。
 func putExecCtx(ctx *execCtx) {
-	if ctx.Args != nil && cap(ctx.Args) <= 128 {
-		argsPool.Put(ctx.Args[:0])
-	}
 	ctx.Fn = nil
 	ctx.Args = nil
+	ctx.sc.outer = nil
+	ctx.sc.vars = nil
+	ctx.sc.slots = nil
+	ctx.sc.paramNames = nil
 	execCtxPool.Put(ctx)
 }
 

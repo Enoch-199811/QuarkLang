@@ -1580,13 +1580,13 @@ func (c *checker) inferCall(x *CallExpr, sc *cScope) (*Type, error) {
 		if !ok {
 			return nil, c.errf(id.Pos, "CompileError: undeclared function %q", id.Name)
 		}
-		// v2 签名：@mb(prefix) —— mb 是变量（Sign 实例），结果类型 = 被包装函数返回类型
+		// v2 签名：@instance(prefix) —— instance 是变量（Sign 实例，名字任意），结果类型 = 被包装函数返回类型
 		if err := c.checkCallArgs(fn, x.Args, sc, x.Pos); err != nil {
 			return nil, err
 		}
-		// mb 必须在作用域中（Sign 实例变量）
+		// instance 必须在作用域中（Sign 实例变量，名字任意）
 		if v := sc.lookup(x.Sign.Name); v == nil {
-			return nil, c.errf(x.Pos, "CompileError: @%s —— 签名名必须是作用域中的 Sign 实例变量（mb）", x.Sign.Name)
+			return nil, c.errf(x.Pos, "CompileError: @%s —— 签名名必须是作用域中的 Sign 实例变量（名字任意）", x.Sign.Name)
 		}
 		// 结果类型：被包装函数 fn 的返回类型
 		if fn.Ret != "" {

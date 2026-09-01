@@ -8,7 +8,7 @@ import (
 )
 
 func TestHelloIR(t *testing.T) {
-	ir, err := Transpile("func main(io IOStream) {\n    io.println(\"Hello World!\");\n}\n")
+	ir, err := Transpile("fn main(io IOStream) {\n    io.println(\"Hello World!\");\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,7 +27,7 @@ func TestHelloIR(t *testing.T) {
 }
 
 func TestArithmeticIR(t *testing.T) {
-	ir, err := Transpile("func main(io IOStream) {\n    io.println(1 + 2 * 3, \"=\");\n}\n")
+	ir, err := Transpile("fn main(io IOStream) {\n    io.println(1 + 2 * 3, \"=\");\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,8 +50,8 @@ func TestLLIPipeline(t *testing.T) {
 		src  string
 		want string
 	}{
-		{"func main(io IOStream) {\n    io.println(\"Hello World!\");\n}\n", "Hello World!\n"},
-		{"func main(io IOStream) {\n    io.println(1 + 2 * 3, \"=\");\n}\n", "7 =\n"},
+		{"fn main(io IOStream) {\n    io.println(\"Hello World!\");\n}\n", "Hello World!\n"},
+		{"fn main(io IOStream) {\n    io.println(1 + 2 * 3, \"=\");\n}\n", "7 =\n"},
 	}
 	for _, c := range cases {
 		ir, err := Transpile(c.src)
@@ -85,10 +85,10 @@ func TestIRSyntax(t *testing.T) {
 		t.Skip("llvm-as not available")
 	}
 	progs := []string{
-		"func main(io IOStream) {\n    io.println(\"Hello World!\");\n}\n",
-		"func main(io IOStream) {\n    io.println(1 + 2 * 3, \"=\");\n}\n",
-		"func main(io IOStream) {\n    io.println(-5 + 3, 7 % 3);\n}\n",
-		"func main(io IOStream) {\n    io.println(\"a\\nb\", \"q\\\"q\");\n}\n",
+		"fn main(io IOStream) {\n    io.println(\"Hello World!\");\n}\n",
+		"fn main(io IOStream) {\n    io.println(1 + 2 * 3, \"=\");\n}\n",
+		"fn main(io IOStream) {\n    io.println(-5 + 3, 7 % 3);\n}\n",
+		"fn main(io IOStream) {\n    io.println(\"a\\nb\", \"q\\\"q\");\n}\n",
 	}
 	for _, src := range progs {
 		ir, err := Transpile(src)
@@ -117,7 +117,7 @@ func TestUnaryMinusAndModulo(t *testing.T) {
 	if err != nil {
 		t.Skip("lli not available")
 	}
-	ir, err := Transpile("func main(io IOStream) {\n    io.println(-5 + 3, 7 % 3);\n}\n")
+	ir, err := Transpile("fn main(io IOStream) {\n    io.println(-5 + 3, 7 % 3);\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,7 @@ func TestStringEscapes(t *testing.T) {
 	if err != nil {
 		t.Skip("lli not available")
 	}
-	ir, err := Transpile("func main(io IOStream) {\n    io.println(\"a\\nb\", \"q\\\"q\");\n}\n")
+	ir, err := Transpile("fn main(io IOStream) {\n    io.println(\"a\\nb\", \"q\\\"q\");\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func TestVariablesAndControlFlow(t *testing.T) {
 	if err != nil {
 		t.Skip("lli not available")
 	}
-	src := "func main(io IOStream) {\n" +
+	src := "fn main(io IOStream) {\n" +
 		"    x int = 5;\n" +
 		"    y int = x * 2 + 1;\n" +
 		"    io.println(y);\n" +
@@ -211,14 +211,14 @@ func TestFunctionCallAndRecursion(t *testing.T) {
 	if err != nil {
 		t.Skip("lli not available")
 	}
-	src := `func fib(n int) int {
+	src := `fn fib(n int) int {
     if (n < 2) {
         return n;
     }
     return fib(n - 1) + fib(n - 2);
 }
 
-func main(io IOStream) {
+fn main(io IOStream) {
     io.println(fib(10));
 }`
 	ir, err := Transpile(src)

@@ -11,7 +11,7 @@ import (
 // ============ 性能基准（高计算场景） ============
 
 // 算术密集循环：1e6 次循环
-const loopSrc = `func main(io IOStream) {
+const loopSrc = `fn main(io IOStream) {
     n int = 0;
     i int = 0;
     while (i < 1000000) {
@@ -23,24 +23,24 @@ const loopSrc = `func main(io IOStream) {
 `
 
 // 递归计算：fib(24)
-const fibSrc = `func fib(n int) int {
+const fibSrc = `fn fib(n int) int {
     if (n < 2) {
         return n;
     }
     return fib(n - 1) + fib(n - 2);
 }
 
-func main(io IOStream) {
+fn main(io IOStream) {
     io.println(fib(24));
 }
 `
 
 // 密集函数调用 + List 操作
-const callSrc = `func sq(n int) int {
+const callSrc = `fn sq(n int) int {
     return n * n;
 }
 
-func main(io IOStream) {
+fn main(io IOStream) {
     total int = 0;
     i int = 0;
     while (i < 100000) {

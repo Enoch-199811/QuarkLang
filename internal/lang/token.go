@@ -105,7 +105,7 @@ func (e *LexError) Error() string {
 }
 
 var keywords = map[string]TokenKind{
-	"func":      TFunc,
+	"fn":        TFunc,
 	"struct":    TStruct,
 	"impl":      TImpl,
 	"interface": TInterface,

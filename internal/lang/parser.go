@@ -417,11 +417,10 @@ func (p *parser) parseProgram() (*Program, error) {
 
 func (p *parser) parseFunc() (*FuncDecl, error) {
 	kw := p.cur()
-	if p.curIs(TFunc) || (p.curIs(TIdent) && p.cur().Text == "fn") {
-		p.advance()
-	} else {
-		return nil, p.errf(p.cur(), "expected 'func'")
+	if !p.curIs(TFunc) {
+		return nil, p.errf(p.cur(), "expected 'fn'")
 	}
+	p.advance()
 	var typeParams []string
 	if p.curIs(TLt) {
 		// 泛型参数 <T, ...>（xmind §函数：泛型可有可无）

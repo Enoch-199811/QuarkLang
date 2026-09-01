@@ -10,7 +10,7 @@ import (
 
 // 尾延迟 P99/P999：QuarkLang 解释器（零 GC，block 复用）vs Go（GC 停顿）。
 func TestP99Latency(t *testing.T) {
-	qsrc := "func main(io IOStream) {\n" +
+	qsrc := "fn main(io IOStream) {\n" +
 		"    i int = 0;\n" +
 		"    while (i < 50000) {\n" +
 		"        l List<int> = [1, 2, 3];\n" +

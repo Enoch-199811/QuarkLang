@@ -1,4 +1,4 @@
-func work(n int) int {
+fn work(n int) int {
     s int = 0;
     i int = 0;
     while (i < 100000) {
@@ -7,7 +7,7 @@ func work(n int) int {
     }
     return s + n;
 }
-func main(io IOStream) {
+fn main(io IOStream) {
     t thread = taskm.spawn();
     t.merge(work, 1);
     taskm.block(t.pid());

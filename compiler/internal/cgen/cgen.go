@@ -1241,7 +1241,7 @@ func (p *parser) parseProgram() error {
 			p.skipSpace()
 			continue
 		}
-		if name != "func" {
+		if name != "fn" {
 			return p.errf("compiler v0.2 supports only func/type/impl declarations, got %q", name)
 		}
 		if err := p.parseFunc(); err != nil {

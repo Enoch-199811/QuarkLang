@@ -37,9 +37,9 @@ func ExportLibrary(prog *Program, outPath string) error {
 		if fn.Ret != "" {
 			sb.WriteString(" " + fn.Ret)
 		}
-		sb.WriteString(" {" + "\\n")
+		sb.WriteString(" {" + "\n")
 		sb.WriteString(body)
-		sb.WriteString("}" + "\\n")
+		sb.WriteString("}" + "\n")
 		syms[fn.Name] = sb.String()
 	}
 	var buf bytes.Buffer
@@ -88,7 +88,7 @@ func LoadImport(dir, path string) (string, error) {
 	var sb strings.Builder
 	for _, src := range syms {
 		sb.WriteString(src)
-		sb.WriteString("\\n")
+		sb.WriteString("\n")
 	}
 	return sb.String(), nil
 }
@@ -99,23 +99,39 @@ func CompileWithImports(src, filename string) (*Program, error) {
 	if filename != "" {
 		dir = filepath.Dir(filename)
 	}
-	prog, err := Compile(src)
+	// 先 Parse（不 Typecheck）提取 import 列表：import 的符号在合并前不存在，
+	// 直接 Compile(src) 会误报 undeclared function。
+	toks, err := Lex(src)
+	if err != nil {
+		return nil, err
+	}
+	macros, rest, err := SplitMacroDefs(toks)
+	if err != nil {
+		return nil, err
+	}
+	if len(macros) > 0 {
+		rest, err = ExpandMacros(rest, macros, "explain")
+		if err != nil {
+			return nil, err
+		}
+	}
+	prog, err := Parse(rest)
 	if err != nil {
 		return nil, err
 	}
 	if len(prog.Imports) == 0 {
-		return prog, nil
+		return Compile(src)
 	}
 	var merged strings.Builder
 	merged.WriteString(src)
-	merged.WriteString("\\n")
+	merged.WriteString("\n")
 	for _, imp := range prog.Imports {
 		imported, err := LoadImport(dir, imp)
 		if err != nil {
 			return nil, err
 		}
 		merged.WriteString(imported)
-		merged.WriteString("\\n")
+		merged.WriteString("\n")
 	}
 	return Compile(merged.String())
 }
@@ -134,11 +150,12 @@ func extractBody(src string, fn *FuncDecl) string {
 	if fn.BodyStart.Line <= 0 {
 		return ""
 	}
-	lines := strings.Split(src, "\\n")
-	start := fn.BodyStart.Line - 1
-	end := fn.BodyEnd.Line - 1
-	if start < 0 || start >= len(lines) || end >= len(lines) || end < start {
+	lines := strings.Split(src, "\n")
+	// '{' 的下一行起、'}' 的前一行止（索引为 0 基；单行函数体为空）
+	start := fn.BodyStart.Line
+	end := fn.BodyEnd.Line - 2
+	if start <= 0 || end < start || end >= len(lines) {
 		return ""
 	}
-	return strings.Join(lines[start:end+1], "\\n") + "\\n"
+	return strings.Join(lines[start:end+1], "\n") + "\n"
 }

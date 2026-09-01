@@ -1927,6 +1927,11 @@ func (p *parser) parsePrimary() (*expr, error) {
 					continue
 				}
 			}
+			// 签名 f(args) @instance(...)：编译器后端暂未实现，给出明确诊断
+			p.skipSpace()
+			if p.pos < len(p.src) && p.src[p.pos] == '@' {
+				return nil, p.errf("signatures f(args) @instance(...) 暂仅解释器支持（编译器后端待实现）")
+			}
 			return &expr{kind: kCall, call: call}, nil
 		}
 		// 泛型调用类型参数：f<T>(args)（v1 跳过，然后作为函数调用处理）

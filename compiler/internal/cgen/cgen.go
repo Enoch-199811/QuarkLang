@@ -5,6 +5,7 @@ package cgen
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -61,7 +62,8 @@ func (e *emitter) emitInstr(f string, args ...interface{}) {
 
 func (e *emitter) newBlock() string {
 	e.blockCount++
-	return fmt.Sprintf("b%d", e.blockCount)
+	b := strconv.AppendInt(nil, int64(e.blockCount), 10)
+	return "b" + string(b)
 }
 
 // setBlock 切换到命名基本块（首次切换写出块标签）。
@@ -84,7 +86,8 @@ func (e *emitter) toI64(reg string) string {
 
 func (e *emitter) newReg() string {
 	e.regCount++
-	return fmt.Sprintf("%%%d", e.regCount)
+	b := strconv.AppendInt(nil, int64(e.regCount), 10)
+	return "%" + string(b)
 }
 
 func (e *emitter) strConst(s string) strConst {

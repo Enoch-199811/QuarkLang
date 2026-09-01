@@ -1,85 +1,91 @@
 # QuarkLang
 
-一门以「函数调用可观测」为核心的语言：每次函数调用产出 **FuncBuffer**（head 参数 / tail 结果 / log 日志），`@` **签名**（Sign 接口）对调用做第二层包装；**List 是双指针滚动缓冲**（`*` 取开头、`next()` 滚动、耗尽报错）；语言默认**严格检查**，出错时回放 log 定位「为什么运行错了」。定位：**CLI 工具的语言**。
+一门**编译型编程语言**：为高计算、高并发、海量临时数据场景设计。同一种语法，双后端：**Go 解释器**（开发/调试）+ **LLVM IR 编译器**（`qkc`，性能 = C 级）。
 
-## 特性
+## 亮点
 
-- **FuncBuffer**：head（输入参数）/ tail（out 结果）/ log（执行日志）三件套，调用值默认是整个缓冲区；
-- **@ 签名**：`f(args) @memorize(mb)`、`f(args) @async()`——对调用做第二层包装（Sign 接口，`call` 为默认要求）；
-- **滚动 List**：`*` 取开头、`next()` 滚到头、`head()==tail()` 耗尽报错、`reset()` 回卷、`for (x : l)` 语法糖；
-- **严格检查**：编译期静态类型检查（未声明标识符/成员、类型不匹配、使用前未初始化、签名注册等，错误带行号）+ 运行期硬错误 + log 回放诊断；
-- **协程系统**：`@async()`、全局变量 `taskm`（`taskm.spawn(...)`→pid / `taskm.block(pid)` / `taskm.merge(pid)` / `taskm.done(pid)` / `taskm.channel([n])` 默认 1024）、Task（是否完成 + 完整函数）、IOStream 执行表（FIFO、读优先）、调度事件自动日志（spawn 带 pid / done）；
-- **IO 体系**：`main(io IOStream, env, args)` 数据流注入、`IO::setIn/setOut` 与 `io.setIn/setOut` 重定向、File/Console 流；
-- **C 风格数值**：int 32 位环绕、越界字面量编译错误；`Copyd<T>` 传递复制语义。
-- **struct / impl / interface**：用户自定义结构体与接口；`self` 实例方法（`.` 调用）与静态方法（`::` 调用）；`impl Sign` 接口一致性检查；用户类型可直接实现 Sign 作为自定义签名（如 `@LocalMemorize(mb)`）。
-- **泛型 / 指针 / Copyd**：`struct<T>` / `impl<T>`（struct 有泛型参数时 impl 必须引入，实例化替换检查）；指针类型 `T&` 与 `null`（自动解引用、NullPointerError）；`Copyd<T>` 运行时包装 + `.ptr()`。
-- **真实内存系统**：block 分配（`memory.setBlock(n)` 调粒度）、写入标脏、协程结束自动标记可回收、`compact()` 实际清理。
+- **编译路径性能 = C**：LLVM `-O3` 同后端（fib35 21ms vs C 22ms；P99 延迟分布逐分位同级）；
+- **并发模型 = Erlang 式**：`spawn/merge/block/done/channel` 用户态任务 + 线程池——并发模型是 Erlang 式，性能是 C 级；
+- **零 GC 内存**：block 线性分配 + 占用度最小堆，`delete` 入空闲队列（数据保留）、`clear` 才清空——无 GC 停顿、碎片率 0.195%、复用率 99.96%；
+- **sum 数学优化**：线性闭式 / 周期位级置换 / 均匀随机期望——10 亿项求和 O(1)（2ms，Go 循环 223ms）；
+- **增量编译**：IR+二进制两级缓存，二次编译 16 倍提速；
+- **零第三方依赖**：词法/解析/类型检查/求值/LLVM IR 发射全部手写。
 
-## 快速开始（Get Started）
+## 特性（v2 语法面）
 
-### 解释器（仓库根目录，Go 模块 `quarklang`）
+- **函数**：显式返回类型，`return expr` 结束并返回，`log expr;` 记录并结束；
+- **try/catch**：`try { } catch (e void) { }`（除零等错误可捕获）；
+- **void = 空接口**：任意值可赋；
+- **struct / impl / interface**：`type struct { a int; } Point;`、`impl Point { fn sum(self) int {...} }`、`.{3, 5}` 字面量、`self.a` 字段访问；
+- **泛型**：`func<T>` / `f<int>(x)`（类型擦除，编译可用）；
+- **函数引用**：`type function<int, int> F;`、函数作为值传递与调用；
+- **指针 / 堆申请**：`pointer <T>` 修饰、`new <type>[size]` 堆上申请（非法大小 `badAlloc`）、空指针解引用 `NullPointerError`；
+- **签名**：`f(args) @mb(prefix)` ≡ `mb.call(prefix)(.{in, out})`——记忆化/包装；
+- **taskm 并发**：`t thread = taskm.spawn(); t.merge(fn, args); taskm.block(t.pid()); taskm.done(pid); c channel = taskm.channel(); c.send(v); c.recv();`——用户态任务 + 线程池（编译路径 pthread 载体，跨系统）；
+- **宏系统**：`macro {模式}{主体}`、`#when(compile/explain)`、`#insert(#ast(...))`、`#exec`、`#error`——**解释器与编译器共享同一 token 级宏展开**；
+- **delete/clear 语义**：`delete` 入空闲队列（数据保留，可复用），`clear` 真正清空空闲数据（使用中保留，数据安全）；
+- **List<int>**：字面量/下标/`size()`/`get(i)`/`append(v)`（几何增长 O(n)）；
+- **program/library**：`program main;`/`library;`、`import`、`pub`——可发布为 `.qlib` 库；
+- **解释器与编译器语法完全一致**（同前端，双后端）。
 
-~~~sh
-go build -o quark .          # 构建 CLI
-./quark examples/hello.qk    # 运行 .qk 程序（Hello World!）
-go test ./internal/lang/     # 47 项测试（go test -race 同样可跑）
-~~~
+## 快速开始
 
-### 编译器（`compiler/` 目录，独立 Go 模块 `quarklang/compiler`，LLVM 后端）
+### 解释器（仓库根，Go 模块 `quarklang`）
 
-需要本机 LLVM 工具链（`clang`/`lli`/`llvm-as`；仅生成 IR 可只需要 `llvm-as`）。
+```sh
+go build -o quark .
+./quark examples/hello.qk
+go test ./internal/lang/     # 全量测试（-race 可跑）
+```
 
-**依赖说明**：
-- **Go ≥ 1.21**：解释器与编译器均为纯 Go 实现，**零第三方 Go 依赖**（词法/解析/类型检查/求值/LLVM IR 发射全部手写）；
-- **LLVM 工具链**（系统包，如 `clang`/`llvm`）：`qkc -run` 用 `clang` 编译 IR 为原生二进制；测试用 `lli` 做全链路执行、`llvm-as` 做 IR 语法校验；
-- 可选：`rustc`/`gcc` 仅用于跨语言性能对比基准，不影响构建；
-- **跨系统**：qkc 产出与平台无关的 LLVM IR（llvm-as 语法校验），由目标平台 `clang`/`llc` 生成该平台原生二进制；`program library` 导出的 `.qlib`（gob）跨系统；
-- **优化旗标**：默认 `-O3`（便携基线）；本机极限用 `QUARK_CFLAGS="-O3 -march=native"`（产物仅当前 CPU）；
-- 缓存目录：qkc 增量编译缓存默认 `/tmp/quarklang-cache`（可用环境变量 `QUARK_CACHE` 覆盖）。
+### 编译器（`compiler/`，LLVM 后端）
 
-~~~sh
-cd compiler
-go run . testdata/hello.qk          # 输出 LLVM IR 到 stdout
-go run . -run testdata/hello.qk     # clang 编译为原生二进制并执行
-go test ./...                       # 7 项测试（llvm-as 语法校验 + lli 全链路）
-~~~
+```sh
+cd compiler && go build -o qkc .
+./qkc -run hello.qk          # LLVM IR → clang 原生 → 执行
+./qkc hello.qk               # 仅输出 IR
+```
 
-## 示例
+**依赖**：Go ≥ 1.21（零第三方 Go 依赖）；LLVM 工具链（`clang`/`lli`/`llvm-as`，系统包）。可选 `rustc`/`gcc` 仅用于跨语言对比基准。
 
-| 示例 | 说明 |
-|---|---|
-| `examples/hello.qk` | Hello World |
-| `examples/list.qk` | 滚动 List：`*` / `next()` / `for` / `reset()` |
-| `examples/localsorted.qk` | Copyd 副本排序 + out 多返回值 |
-| `examples/memo.qk` | @memorize 缓存（head→tail 映射）+ 手动 log |
-| `examples/io.qk` | IO 重定向与 Console/File 流 |
-| `examples/async.qk` | 协程：@async() / channel / taskm.spawn→pid · block · done / 自动日志 |
-| `examples/error.qk` | ListExhaustedError + log 回放演示 |
-| `examples/struct.qk` | 用户 struct/interface/impl + 用户自定义 Sign |
+**跨系统**：qkc 产出与平台无关的 LLVM IR，目标平台 `clang`/`llc` 生成原生二进制；`.qlib` 库（gob）跨系统；线程运行时（`qthreads.c` 内嵌）POSIX/Windows 双载体。
+
+**优化旗标**：默认 `-O3`（便携）；`QUARK_CFLAGS="-O3 -march=native"` 本机极限（产物仅当前 CPU）；PGO 可用 `-fprofile-generate/-fprofile-use`（fib35 -29%）。
+
+**缓存**：增量编译缓存默认 `/tmp/quarklang-cache`（`QUARK_CACHE` 覆盖）；`QUARK_CFLAGS` 参与缓存键。
+
+## 性能（实测，可复现）
+
+| 基准 | QuarkLang(编译) | C | Rust | Go | Erlang |
+|---|---|---|---|---|---|
+| fib(30) | **3ms** | 3ms | 3ms | 6ms | 1106ms |
+| fib(35) | **21ms** | 22ms | **17ms** | 36ms | — |
+| 8 路并发 ×1e7 | **1ms** | — | — | 6ms | 61s(1e5) |
+| P99（fib20×1000） | **14/27µs** | 16/25µs | — | — | — |
+| 潮汐 1 亿轮 | **1ms** | 1ms | 29ms | 92ms | — |
+| sum 10 亿项（闭式） | **2ms** | — | — | 223ms | — |
+
+复现：`bench/Makefile`（跨语言）+ `docs/benchmarks.md`（方法/公正性声明）。
 
 ## 布局
 
-- `main.go` —— 解释器 CLI 入口：`quark <file.qk> [args...]`
-- `internal/lang/` —— lexer / parser / typecheck / eval / runtime
-- `examples/` —— 示例程序
-- `compiler/` —— LLVM 编译器（`qkc` CLI + `internal/cgen` IR 发射器 + 测试）
+- `main.go` + `internal/lang/` —— 解释器（lexer/parser/typecheck/eval/runtime/宏）
+- `compiler/` —— LLVM 编译器（`qkc` + `internal/cgen` IR 发射器 + 内嵌线程运行时）
+- `bench/` —— 跨语言对比源（C/Rust/Go/Erlang + Makefile）
+- `examples/` —— 示例
 
 ## 分支
 
 | 分支 | 内容 |
 |---|---|
-| `main` | 集成分支（interpreter + examples 的合并结果） |
-| `interpreter` | 解释器实现（lexer/parser/typecheck/eval/runtime） |
-| `compiler` | 编译器（**已并入 main**，位于 `compiler/` 目录；分支保留历史） |
-| `examples` | 示例程序 |
-| `docs` | 语言设计文档（独立维护，**不并入 main**） |
+| `main` | 集成（解释器 + 编译器 + bench） |
+| `interpreter` | 解释器历史 |
+| `examples` | 示例 |
+| `docs` | 设计文档（独立维护，不并入 main；含 benchmarks.md） |
+| `design` | XMind 设计蓝图（只读保护） |
 
-语言设计文档见 [docs 分支的 spec.md](https://github.com/Enoch-199811/QuarkLang/blob/docs/spec.md)（权威来源，随设计迭代；本地可直接在 `docs/` 目录编辑提交，它跟随 docs 分支）。
+设计文档：[docs 分支 spec.md](https://github.com/Enoch-199811/QuarkLang/blob/docs/spec.md)。
 
 ## 状态
 
-v0.2：解释器（滚动 List、FuncBuffer、@memorize/@async 签名、struct/impl/interface、泛型/指针/Copyd、真实内存系统、协程、静态类型检查，**47 项测试全绿**）；编译器（`compiler/`，**LLVM 后端**：变量/控制流/算术/比较/布尔，`-run` 一键编译执行，**7 项测试全绿**）。待实现见 docs 分支 spec §15。
-
-## 许可证
-
-[MIT](LICENSE) © 2026 Enoch-199811
+v2 语法面完整（解释器 + 编译器一致），性能 = C 级（编译路径）。见 `docs/benchmarks.md` 与宣传视频（`/home/jack/quarklang-promo/`）。

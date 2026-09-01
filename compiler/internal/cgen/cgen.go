@@ -1197,6 +1197,22 @@ func (p *parser) parseProgram() error {
 			p.skipSpace()
 			continue
 		}
+		if name == "program" || name == "library" || name == "lib" {
+			// program main; 声明本文件为主程序（main 函数自动编译为 @main 入口）；
+			// library;/lib; 声明为库（编译产物供 import，不生成 main 入口——v1 接受声明）
+			p.skipSpace()
+			if p.pos < len(p.src) && p.src[p.pos] != ';' {
+				if _, err := p.expectIdent(); err != nil {
+					return err
+				}
+			}
+			p.skipSpace()
+			if err := p.expect(';'); err != nil {
+				return err
+			}
+			p.skipSpace()
+			continue
+		}
 		if name == "impl" {
 			p.skipSpace()
 			styp, err := p.expectIdent()

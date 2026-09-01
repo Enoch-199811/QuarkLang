@@ -291,6 +291,24 @@ func (e *emitter) emitStmt(s stmt) {
 	case *exprStmt:
 		e.compileExpr(st.x) // 副作用求值，结果丢弃
 	case *returnStmt:
+		// 尾调用优化：return f(args) → tail call（尾递归栈 O(1)，LLVM 消除帧）
+		if st.x.kind == kCall && st.x.call != nil && st.x.call.name != "sum" && st.x.call.name != "clock" {
+			c := st.x
+			argRegs := make([]string, 0, len(c.call.args))
+			for _, a := range c.call.args {
+				av, _ := e.compileExpr(a)
+				argRegs = append(argRegs, av)
+			}
+			line := "  " + e.newReg() + " = tail call i32 @" + c.call.name
+			if len(argRegs) > 0 {
+				line += "(i32 " + strings.Join(argRegs, ", i32 ") + ")"
+			}
+			line += "\n"
+			e.body.WriteString(line)
+			e.emitInstr("ret i32 %s", strings.Fields(line)[0])
+			e.funcReturned = true
+			break
+		}
 		v, _ := e.compileExpr(st.x)
 		e.emitInstr("ret i32 %s", v)
 		e.funcReturned = true

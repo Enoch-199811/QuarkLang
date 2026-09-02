@@ -269,11 +269,12 @@ type execCtx struct {
 	executed bool
 	pos      Pos
 	sc       scope    // 函数执行作用域（复用，免每次调用堆分配）
-	link     *execCtx // 解释器空闲链（LIFO 复用，替代 sync.Pool）
+	link     *execCtx // 空闲链（无锁 LIFO 栈）
 }
 
 // newCtx 接管调用参数切片所有权（evalArgs 每次新建，免复制）。
-// 上下文走解释器级无锁 LIFO 空闲栈（atomic CAS，单线程热路径仅 1-2 次原子操作）。
+// 无锁 LIFO 空闲链（atomic CAS）：实测优于纯分配（malloc+GC 扫描 > 2 次原子操作），
+// 且对 taskm 并发线程安全（CAS 无共享状态破坏）。
 func (in *interp) newCtx(fn *Func, args []Value, pos Pos) *execCtx {
 	var ctx *execCtx
 	for {
@@ -303,7 +304,15 @@ func (in *interp) newCtx(fn *Func, args []Value, pos Pos) *execCtx {
 	return ctx
 }
 
-// putCtx 归还执行上下文到空闲链。
+// ensureLog 确保日志列表存在（惰性兼容：池版 Log 恒非空，此调用几乎免费）。
+func (ctx *execCtx) ensureLog() *List {
+	if ctx.Log == nil {
+		ctx.Log = NewList()
+	}
+	return ctx.Log
+}
+
+// putCtx 归还原子链（无锁 CAS 推入）。
 func (in *interp) putCtx(ctx *execCtx) {
 	ctx.Fn = nil
 	ctx.Args = nil

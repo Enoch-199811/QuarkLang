@@ -559,7 +559,7 @@ func (in *interp) execStmt(st Stmt, sc *scope, ctx *execCtx) error {
 		if err != nil {
 			return err
 		}
-		ctx.Log.Append(StrV(v.String()))
+		ctx.ensureLog().Append(StrV(v.String()))
 		ctx.result = NilV{}
 		return errReturn
 	case *TryStmt:
@@ -710,7 +710,7 @@ func (in *interp) evalExpr(e Expr, sc *scope, ctx *execCtx) (Value, error) {
 			}
 			n, ok := sv.(IntV)
 			if !ok || n < 0 || n > 1<<26 {
-				ctx.Log.Append(StrV("badAlloc: invalid size"))
+				ctx.ensureLog().Append(StrV("badAlloc: invalid size"))
 				return nil, &RunError{Msg: "badAlloc: new " + x.Typ + " 申请大小非法", Pos: x.Pos, Ctx: ctx}
 			}
 			size = int(n)
@@ -1865,13 +1865,14 @@ func (in *interp) runOnThread(t *Task, fn *Func, args []Value, pos Pos) error {
 	// 内存 block 归属该线程；结束后自动标记可回收
 	blockID := in.mem.Alloc(globalMemory.BlockSize, t.Pid)
 	t.BlockID = blockID
-	ctx := in.newCtx(fn, args, pos)
-	ctx.Log.mem = in.mem
-	ctx.Log.blockID = blockID
-	ctx.Log.Append(StrV(fmt.Sprintf("taskm: merged %s(%d) pid=%d", fn.Name, len(args), t.Pid)))
+	ctx := in.newCtx(fn, args, pos) // 直接分配版本身无共享，taskm 线程安全
+	lg := ctx.ensureLog()
+	lg.mem = in.mem
+	lg.blockID = blockID
+	lg.Append(StrV(fmt.Sprintf("taskm: merged %s(%d) pid=%d", fn.Name, len(args), t.Pid)))
 	go func() {
 		t.err = in.execute(ctx)
-		ctx.Log.Append(StrV("taskm: done"))
+		ctx.ensureLog().Append(StrV("taskm: done"))
 		in.mem.ReclaimTask(t.Pid)
 		in.taskMu.Lock()
 		t.Busy = false
@@ -2165,7 +2166,7 @@ func isCopydType(t string) bool { return strings.Contains(t, "Copyd") }
 // explains what went wrong (spec §11.2).
 func ReportError(err error, w io.Writer) {
 	fmt.Fprintf(w, "error: %s\n", err.Error())
-	if re, ok := err.(*RunError); ok && re.Ctx != nil && re.Ctx.Log.Size() > 0 {
+	if re, ok := err.(*RunError); ok && re.Ctx != nil && re.Ctx.ensureLog().Size() > 0 {
 		fmt.Fprintln(w, "---- execution log ----")
 		l := re.Ctx.Log.copyVisible()
 		for l.Head() != l.Tail() {

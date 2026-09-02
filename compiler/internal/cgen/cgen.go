@@ -660,7 +660,9 @@ func (e *emitter) compileExpr(x *expr) (string, byte) {
 						e.emitInstr("%s = load i8*, i8** %s", tl, ti.reg)
 						rc := e.newReg()
 						e.emitInstr("%s = call i32 @ql_done(i8* %s)", rc, tl)
-						return rc, 'i'
+						rb := e.newReg()
+						e.emitInstr("%s = icmp ne i32 %s, 0", rb, rc)
+						return rb, 'b' // done = 线程是否空闲（bool，同解释器语义）
 					}
 				}
 				return "0", 'i'

@@ -40,7 +40,7 @@ func isSymStart(s string) bool {
 	return !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '"')
 }
 
-// expandMacros 对源码做 token 级宏展开（compile 模式；无宏则原样返回）。
+// expandMacros 对源码做 token 级宏展开（运行态分支；无宏则原样返回）。
 func expandMacros(src string, mode string) (string, error) {
 	// 快速路径：源码不含 macro 关键字时跳过词法+展开（省 Lex 开销）
 	if !strings.Contains(src, "#macro") {
@@ -57,7 +57,7 @@ func expandMacros(src string, mode string) (string, error) {
 	if len(macros) == 0 {
 		return src, nil
 	}
-	exp, err := lang.ExpandMacros(rest, macros, mode)
+	exp, err := lang.ExpandMacros(rest, macros, "run") // qkc 产出的是可执行二进制：选运行态分支
 	if err != nil {
 		return src, nil
 	}

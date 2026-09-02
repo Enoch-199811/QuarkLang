@@ -1670,7 +1670,7 @@ func (in *interp) sumBuiltin(args []Value, pos Pos, ctx *execCtx) (Value, error)
 			{
 				n := stop - begin
 				if n > 0 {
-					return IntV(n << 30), nil // n × 2^30（[0,2^31-1] 均匀的期望）
+					return wrapI32(n << 30), nil // n × 2^30（[0,2^31-1] 均匀的期望）
 				}
 				return IntV(0), nil
 			}
@@ -1714,7 +1714,7 @@ func (in *interp) sumBuiltin(args []Value, pos Pos, ctx *execCtx) (Value, error)
 			// 校验末项：周期函数（如 n%3）三点差分可能巧合相等，末项不符则非线性
 			last := g0 + d1*(n-1)
 			if actual, err := g(begin + (n-1)*step); err == nil && actual == last {
-				return IntV(n * (g0 + last) / 2), nil // 乘加闭式
+				return wrapI32(n * (g0 + last) / 2), nil // 乘加闭式（int=32 位，wrap）
 			}
 		}
 	}
@@ -1748,7 +1748,7 @@ func (in *interp) sumBuiltin(args []Value, pos Pos, ctx *execCtx) (Value, error)
 				}
 				sum += v
 			}
-			return IntV(sum), nil
+			return wrapI32(sum), nil // 周期位级置换闭式：int=32 位 wrap
 		}
 	}
 	// 无短周期（如 32 位全周期随机数）：逐项加法（比逐项位统计更快）
@@ -1760,7 +1760,7 @@ func (in *interp) sumBuiltin(args []Value, pos Pos, ctx *execCtx) (Value, error)
 		}
 		total += v
 	}
-	return IntV(total), nil
+	return wrapI32(total), nil // 退化循环/周期兜底：int=32 位 wrap
 }
 
 // detectPeriod 检测生成器序列周期（最多探测 65536 项，步进 step）。

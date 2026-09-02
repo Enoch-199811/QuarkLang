@@ -45,12 +45,25 @@ func cacheDir() string {
 	return dir
 }
 
+// engineVersion 编译器/运行时代次：任何 cgen/宏展开行为变化都必须递增，
+// 避免 IR/二进制缓存返回旧引擎产物（本次踩坑：宏展开模式与 done-bool 修复被缓存吞掉）。
+const engineVersion = "3"
+
+// engineFingerprint 缓存键前缀：引擎代次 + 线程运行时指纹（运行时任何改动自动失效）。
+func engineFingerprint() string {
+	h := sha256.Sum256([]byte(qthreadsC))
+	return engineVersion + "-" + hex.EncodeToString(h[:8])
+}
+
 func srcHash(path string) (string, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}
-	h := sha256.Sum256(b)
+	c := sha256.Sum256([]byte(engineFingerprint()))
+	key := append([]byte(engineFingerprint()), b...)
+	h := sha256.Sum256(key)
+	_ = c
 	return hex.EncodeToString(h[:16]), nil
 }
 

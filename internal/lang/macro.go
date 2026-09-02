@@ -163,7 +163,7 @@ func ExpandMacros(toks []Token, macros []*MacroDef, mode string) ([]Token, error
 					for p, pname := range m.Params {
 						subst[pname] = callArgs[p]
 					}
-					body, _, err := expandBody(m.Body, subst, mode)
+					body, _, err := expandBody(m.Body, subst, mode, m.Params)
 					if err != nil {
 						return nil, fmt.Errorf("宏 %s 展开失败：%v", m.Name, err)
 					}
@@ -195,7 +195,7 @@ func macroCallExcluded(i int, toks []Token) bool {
 // #return <token...> 是宏的返回值（展开结果 = 返回指令后的 token，参数替换后），立即终止整个展开；
 // #error("msg") 直接报错；#insert/#execute/#ast 已随 pattern 语法移除。
 // 返回 (输出, 是否被 #return 终止)。
-func expandBody(body []Token, subst map[string][]Token, mode string) ([]Token, bool, error) {
+func expandBody(body []Token, subst map[string][]Token, mode string, paramOrder []string) ([]Token, bool, error) {
 	var out []Token
 	i := 0
 	for i < len(body) {
@@ -215,17 +215,13 @@ func expandBody(body []Token, subst map[string][]Token, mode string) ([]Token, b
 		cmd := body[i+1].Text
 		i += 2
 		if cmd == "return" {
-			// #return <expr>：展开结果 = 返回指令后的全部 token（参数替换），终止整个宏
-			if i >= len(body) {
-				return out, true, nil
+			// #return <expr>：显示结果 = 返回指令后的全部内容（参数替换 + 后续指令继续处理），
+			// 例如 #return #insert(#ast(a))；并终止整个宏展开。
+			sub, _, err := expandBody(body[i:], subst, mode, paramOrder)
+			if err != nil {
+				return nil, false, err
 			}
-			for _, rt := range body[i:] {
-				if sub, ok := subst[rt.Text]; ok && rt.Kind == TIdent {
-					out = append(out, sub...)
-				} else {
-					out = append(out, rt)
-				}
-			}
+			out = append(out, sub...)
 			return out, true, nil
 		}
 		if i >= len(body) {
@@ -254,7 +250,7 @@ func expandBody(body []Token, subst map[string][]Token, mode string) ([]Token, b
 			}
 			i = ni
 			if args[0].Text == mode || (mode == "explain" && args[0].Text == "run") {
-				sub, stop, err := expandBody(blk, subst, mode)
+				sub, stop, err := expandBody(blk, subst, mode, paramOrder)
 				if err != nil {
 					return nil, false, err
 				}
@@ -268,13 +264,53 @@ func expandBody(body []Token, subst map[string][]Token, mode string) ([]Token, b
 				return nil, false, fmt.Errorf("第 %d 行：#error 需要 (\"消息\")", t.Line)
 			}
 			return nil, false, fmt.Errorf("第 %d 行：预处理错误 #error(%s)", t.Line, args[0].Text)
-		case "insert", "execute", "exec", "ast":
-			return nil, false, fmt.Errorf("第 %d 行：#%s 已移除 —— 新宏语法 #macro name (参数) { 主体 } 中参数按名替换，无需 #insert/#ast", t.Line, cmd)
+		case "insert":
+			// #insert(#ast(name))：直插参数 name 的 token；#insert(#ast(...))：按序直插全部参数
+			inner, err := parseAstArg(args)
+			if err != nil {
+				return nil, false, err
+			}
+			if inner == "..." {
+				// 全部参数按声明顺序直插（逗号连接，转发调用形式 f(#insert(#ast(...)))）
+				for pi, pname := range paramOrder {
+					if pi > 0 {
+						out = append(out, Token{Kind: TComma, Text: ",", Line: t.Line, Col: t.Col})
+					}
+					out = append(out, subst[pname]...)
+				}
+			} else {
+				captured, ok := subst[inner]
+				if !ok {
+					return nil, false, fmt.Errorf("第 %d 行：#insert(#ast(%s))：%s 不是宏参数名", t.Line, inner, inner)
+				}
+				out = append(out, captured...)
+			}
+		case "execute":
+			// #execute(name)：直插一个标识符 token（原语义：拼接生成的名字）
+			if len(args) < 1 || args[0].Kind != TIdent {
+				return nil, false, fmt.Errorf("第 %d 行：#execute 需要 (名字)", t.Line)
+			}
+			out = append(out, Token{Kind: TIdent, Text: args[0].Text, Line: t.Line, Col: t.Col})
 		default:
 			return nil, false, fmt.Errorf("第 %d 行：未知预处理命令 #%s", t.Line, cmd)
 		}
 	}
 	return out, false, nil
+}
+
+// parseAstArg 解析 (#ast(名字)) 参数，返回名字；名字可为参数名或 ...（全部参数）。
+func parseAstArg(args []Token) (string, error) {
+	if len(args) < 4 || args[0].Kind != TSharp || args[1].Kind != TIdent || args[1].Text != "ast" ||
+		args[2].Kind != TLParen || args[len(args)-1].Kind != TRParen {
+		return "", fmt.Errorf("#insert 需要 (#ast(名字)) 形式")
+	}
+	if len(args) >= 5 && args[3].Kind == TDot && args[4].Kind == TDot && len(args) >= 6 && args[5].Kind == TDot {
+		return "...", nil
+	}
+	if args[3].Kind == TIdent {
+		return args[3].Text, nil
+	}
+	return "", fmt.Errorf("#insert 需要 (#ast(名字)) 形式")
 }
 
 // String 便于报错展示。

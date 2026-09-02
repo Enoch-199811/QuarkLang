@@ -107,7 +107,7 @@ func (s *scope) get(name string, pos Pos) (Value, error) {
 			return v, nil
 		}
 	}
-	return nil, &RunError{Msg: fmt.Sprintf("CompileError: undeclared identifier %q", name), Pos: pos}
+	return NilV(), &RunError{Msg: fmt.Sprintf("CompileError: undeclared identifier %q", name), Pos: pos}
 }
 
 // signDef is a registered signature: name -> call implementation.
@@ -419,11 +419,11 @@ func runWithInterp(prog *Program, filename string, args []string, stdin io.Reade
 	var mainArgs []Value
 	switch len(mainFn.Params) {
 	case 1:
-		mainArgs = []Value{ioObj}
+		mainArgs = []Value{IOV(ioObj)}
 	case 2:
-		mainArgs = []Value{ioObj, env}
+		mainArgs = []Value{IOV(ioObj), TableV(env)}
 	case 3:
-		mainArgs = []Value{ioObj, env, argList}
+		mainArgs = []Value{IOV(ioObj), TableV(env), ListV(argList)}
 	default:
 		return nil, fmt.Errorf("CompileError: main must take 1-3 params in order (io IOStream, env HashTable<String,String>, args List<String>), got %d", len(mainFn.Params))
 	}
@@ -451,10 +451,10 @@ func baseTypeName(typ string) string {
 // zeroValue 按类型注解生成零值。
 func (in *interp) zeroValue(typ string) Value {
 	if strings.HasSuffix(typ, "&") {
-		return NilV{} // 指针零值 = null
+		return NilV() // 指针零值 = null
 	}
 	if d, ok := in.structs[baseTypeName(typ)]; ok {
-		return in.zeroInstance(d)
+		return StructV(in.zeroInstance(d))
 	}
 	switch baseTypeName(typ) {
 	case "int", "long", "char":
@@ -467,12 +467,12 @@ func (in *interp) zeroValue(typ string) Value {
 		return BoolV(false)
 	}
 	if strings.Contains(typ, "List") || strings.Contains(typ, "Array") {
-		return NewList()
+		return ListV(NewList())
 	}
 	if strings.Contains(typ, "HashTable") {
-		return NewHashTable()
+		return TableV(NewHashTable())
 	}
-	return NilV{}
+	return NilV()
 }
 
 func envTable() *HashTable {
@@ -535,16 +535,18 @@ func (in *interp) execStmt(st Stmt, sc *scope, ctx *execCtx) error {
 		if err != nil {
 			return err
 		}
-		if sv, ok := v.(*StructValue); ok {
+		if v.IsStruct() {
+			sv := v.Struct()
 			if def, has := in.impls[sv.SType]; has {
 				if fn, ok := def.SelfMethods["__delete__"]; ok {
-					if _, err := in.callFunc(fn, []Value{sv}, s.Pos); err != nil {
+					if _, err := in.callFunc(fn, []Value{StructV(sv)}, s.Pos); err != nil {
 						return err
 					}
 				}
 			}
 		}
-		if l, ok := v.(*List); ok {
+		if v.IsList() {
+			l := v.List()
 			// List 加入空闲队列（无 block 时先分配以记录）
 			id := l.blockID
 			if id == 0 {
@@ -560,7 +562,7 @@ func (in *interp) execStmt(st Stmt, sc *scope, ctx *execCtx) error {
 			return err
 		}
 		ctx.ensureLog().Append(StrV(v.String()))
-		ctx.result = NilV{}
+		ctx.result = NilV()
 		return errReturn
 	case *TryStmt:
 		// try/catch：try 块出错（非 return）时把错误装入 catch 变量（interface{}），执行 catch 块
@@ -623,10 +625,10 @@ func (in *interp) execStmt(st Stmt, sc *scope, ctx *execCtx) error {
 		if err != nil {
 			return err
 		}
-		l, ok := v.(*List)
-		if !ok {
+		if !v.IsList() {
 			return &RunError{Msg: fmt.Sprintf("TypeError: for-in requires a List, got %s", v.TypeName()), Pos: s.Pos, Ctx: ctx}
 		}
+		l := v.List()
 		inner := newScope(sc)
 		for l.Head() != l.Tail() {
 			item, err := l.Next()
@@ -643,7 +645,7 @@ func (in *interp) execStmt(st Stmt, sc *scope, ctx *execCtx) error {
 		}
 		return nil
 	case *DeclStmt:
-		var v Value = NilV{}
+		var v Value = NilV()
 		if s.Init != nil {
 			var err error
 			v, err = in.evalExpr(s.Init, sc, ctx)
@@ -651,7 +653,7 @@ func (in *interp) execStmt(st Stmt, sc *scope, ctx *execCtx) error {
 				return err
 			}
 		} else if def, ok := in.structs[baseTypeName(s.Type)]; ok {
-			v = in.zeroInstance(def)
+			v = StructV(in.zeroInstance(def))
 		}
 		return sc.declare(s.Name, v, s.Pos)
 	case *AssignStmt:
@@ -667,16 +669,17 @@ func (in *interp) execStmt(st Stmt, sc *scope, ctx *execCtx) error {
 			if err != nil {
 				return err
 			}
-			if _, isNil := obj.(NilV); isNil {
+			if obj.IsNil() {
 				return &RunError{Msg: "NullPointerError: assignment through null pointer", Pos: s.Pos, Ctx: ctx}
 			}
-			if c, ok := obj.(*CopydValue); ok {
+			if obj.IsCopyd() {
+				c := obj.Copyd()
 				obj = c.V
 			}
-			sv, ok := obj.(*StructValue)
-			if !ok {
+			if !obj.IsStruct() {
 				return &RunError{Msg: fmt.Sprintf("TypeError: cannot assign member of %s", obj.TypeName()), Pos: s.Pos, Ctx: ctx}
 			}
+			sv := obj.Struct()
 			if _, exists := sv.Fields[t.Name]; !exists {
 				return &RunError{Msg: fmt.Sprintf("TypeError: no member %q on %s", t.Name, sv.SType), Pos: t.Pos, Ctx: ctx}
 			}
@@ -699,28 +702,27 @@ func (in *interp) evalExpr(e Expr, sc *scope, ctx *execCtx) (Value, error) {
 	case *BoolLit:
 		return BoolV(x.V), nil
 	case *NullLit:
-		return NilV{}, nil
+		return NilV(), nil
 	case *NewExpr:
 		// new <type>[size]：堆上申请（block 分配）；size 非法 → badAlloc
 		size := 1
 		if x.Size != nil {
 			sv, err := in.evalExpr(x.Size, sc, ctx)
 			if err != nil {
-				return nil, err
+				return NilV(), err
 			}
-			n, ok := sv.(IntV)
-			if !ok || n < 0 || n > 1<<26 {
+			if !sv.IsInt() || sv.Int() < 0 || sv.Int() > 1<<26 {
 				ctx.ensureLog().Append(StrV("badAlloc: invalid size"))
-				return nil, &RunError{Msg: "badAlloc: new " + x.Typ + " 申请大小非法", Pos: x.Pos, Ctx: ctx}
+				return NilV(), &RunError{Msg: "badAlloc: new " + x.Typ + " 申请大小非法", Pos: x.Pos, Ctx: ctx}
 			}
-			size = int(n)
+			size = int(sv.Int())
 		}
 		// 在堆（block 管理）上申请
 		id := in.mem.Alloc(size*8, 0)
 		l := NewList()
 		l.mem = in.mem
 		l.blockID = id
-		return l, nil
+		return ListV(l), nil
 	case *StructLit:
 		st := x.Name
 		if st == "" {
@@ -736,7 +738,7 @@ func (in *interp) evalExpr(e Expr, sc *scope, ctx *execCtx) (Value, error) {
 		for _, f := range x.Fields {
 			v, err := in.evalExpr(f.X, sc, ctx)
 			if err != nil {
-				return nil, err
+				return NilV(), err
 			}
 			name := f.Name
 			if name == "" && idx < len(fieldNames) {
@@ -745,7 +747,7 @@ func (in *interp) evalExpr(e Expr, sc *scope, ctx *execCtx) (Value, error) {
 			idx++
 			sv.Fields[name] = v
 		}
-		return sv, nil
+		return StructV(sv), nil
 	case *Ident:
 		if x.Name == "true" {
 			return BoolV(true), nil
@@ -754,77 +756,79 @@ func (in *interp) evalExpr(e Expr, sc *scope, ctx *execCtx) (Value, error) {
 			return BoolV(false), nil
 		}
 		if x.Name == "memory" || x.Name == "GlobalMemory" {
-			return globalMemory, nil
+			return MemoryV(globalMemory), nil
 		}
 		if x.Name == "taskm" {
-			return globalTaskm, nil
+			return TaskmV(globalTaskm), nil
 		}
 		v, err := sc.get(x.Name, x.Pos)
 		if err == nil {
 			return v, nil
 		}
 		if fn, ok := in.fns[x.Name]; ok {
-			return &FuncValue{fn: fn}, nil
+			return FuncV(&FuncValue{fn: fn}), nil
 		}
 		// 内置函数作为函数引用（sum(rand, ...)）
 		if isBuiltinFuncName(x.Name) {
-			return &FuncValue{fn: &Func{Name: x.Name, Params: []Param{}, Ret: "int"}}, nil
+			return FuncV(&FuncValue{fn: &Func{Name: x.Name, Params: []Param{}, Ret: "int"}}), nil
 		}
-		return nil, err
+		return NilV(), err
 	case *ListLit:
 		l := NewList()
 		for _, it := range x.Items {
 			v, err := in.evalExpr(it, sc, ctx)
 			if err != nil {
-				return nil, err
+				return NilV(), err
 			}
 			l.Append(v)
 		}
-		return l, nil
+		return ListV(l), nil
 	case *UnOp:
 		v, err := in.evalExpr(x.X, sc, ctx)
 		if err != nil {
-			return nil, err
+			return NilV(), err
 		}
 		switch x.Op {
 		case "*":
-			l, ok := v.(*List)
-			if !ok {
-				return nil, &RunError{Msg: fmt.Sprintf("TypeError: '*' requires a List, got %s", v.TypeName()), Pos: x.Pos, Ctx: ctx}
+			if !v.IsList() {
+				return NilV(), &RunError{Msg: fmt.Sprintf("TypeError: '*' requires a List, got %s", v.TypeName()), Pos: x.Pos, Ctx: ctx}
 			}
+			l := v.List()
 			item, err := l.Peek()
 			if err != nil {
-				return nil, &RunError{Msg: err.Error(), Pos: x.Pos, Ctx: ctx}
+				return NilV(), &RunError{Msg: err.Error(), Pos: x.Pos, Ctx: ctx}
 			}
 			return item, nil
 		case "-":
-			switch n := v.(type) {
-			case IntV:
-				return wrapI32(-int64(n)), nil
-			case FloatV:
-				return -n, nil
+			if v.IsInt() {
+				return wrapI32(-v.Int()), nil
 			}
-			return nil, &RunError{Msg: fmt.Sprintf("TypeError: unary '-' requires a number, got %s", v.TypeName()), Pos: x.Pos, Ctx: ctx}
+			if v.IsFloat() {
+				return FloatV(-v.Float()), nil
+			}
+			return NilV(), &RunError{Msg: fmt.Sprintf("TypeError: unary '-' requires a number, got %s", v.TypeName()), Pos: x.Pos, Ctx: ctx}
 		case "!":
 			b, err := truthy(v)
 			if err != nil {
-				return nil, &RunError{Msg: err.Error(), Pos: x.Pos, Ctx: ctx}
+				return NilV(), &RunError{Msg: err.Error(), Pos: x.Pos, Ctx: ctx}
 			}
 			return BoolV(!b), nil
 		}
-		return nil, &RunError{Msg: "internal: unknown unary operator " + x.Op, Pos: x.Pos, Ctx: ctx}
+		return NilV(), &RunError{Msg: "internal: unknown unary operator " + x.Op, Pos: x.Pos, Ctx: ctx}
 	case *BinOp:
 		l, err := in.evalExpr(x.L, sc, ctx)
 		if err != nil {
-			return nil, err
+			return NilV(), err
 		}
 		// 快路径：两侧都是 int 的算术/位移直通（免 binOp 分发，fib/循环类大热）
-		if li, ok := l.(IntV); ok && x.Op != "&&" && x.Op != "||" {
+		if l.IsInt() && x.Op != "&&" && x.Op != "||" {
+			li := l.Int()
 			if rv, err := in.evalExpr(x.R, sc, ctx); err == nil {
-				if ri, ok := rv.(IntV); ok {
+				if rv.IsInt() {
+					ri := rv.Int()
 					switch x.Op {
 					case "+":
-						return wrapI32(int64(li) + int64(ri)), nil
+						return wrapI32(li + ri), nil
 					case "-":
 						return wrapI32(int64(li) - int64(ri)), nil
 					case "*":
@@ -834,18 +838,18 @@ func (in *interp) evalExpr(e Expr, sc *scope, ctx *execCtx) (Value, error) {
 						return wrapI32(int64(li) * int64(ri)), nil
 					case "/":
 						if ri == 0 {
-							return nil, &RunError{Msg: "DivisionByZeroError: integer division by zero", Pos: x.Pos, Ctx: ctx}
+							return NilV(), &RunError{Msg: "DivisionByZeroError: integer division by zero", Pos: x.Pos, Ctx: ctx}
 						}
 						return wrapI32(int64(li) / int64(ri)), nil
 					case "%":
 						if ri == 0 {
-							return nil, &RunError{Msg: "DivisionByZeroError: modulo by zero", Pos: x.Pos, Ctx: ctx}
+							return NilV(), &RunError{Msg: "DivisionByZeroError: modulo by zero", Pos: x.Pos, Ctx: ctx}
 						}
 						return wrapI32(int64(li) % int64(ri)), nil
 					case "<<":
-						return IntV(int32(li) << uint(ri&31)), nil
+						return IntV(int64(int32(li) << uint(ri&31))), nil
 					case ">>":
-						return IntV(int32(li) >> uint(ri&31)), nil
+						return IntV(int64(int32(li) >> uint(ri&31))), nil
 					case "<":
 						return BoolV(int32(li) < int32(ri)), nil
 					case "<=":
@@ -862,42 +866,42 @@ func (in *interp) evalExpr(e Expr, sc *scope, ctx *execCtx) (Value, error) {
 		if x.Op == "&&" {
 			lb, err := truthy(l)
 			if err != nil {
-				return nil, &RunError{Msg: err.Error(), Pos: x.Pos, Ctx: ctx}
+				return NilV(), &RunError{Msg: err.Error(), Pos: x.Pos, Ctx: ctx}
 			}
 			if !lb {
 				return BoolV(false), nil
 			}
 			r, err := in.evalExpr(x.R, sc, ctx)
 			if err != nil {
-				return nil, err
+				return NilV(), err
 			}
 			rb, err := truthy(r)
 			if err != nil {
-				return nil, &RunError{Msg: err.Error(), Pos: x.Pos, Ctx: ctx}
+				return NilV(), &RunError{Msg: err.Error(), Pos: x.Pos, Ctx: ctx}
 			}
 			return BoolV(rb), nil
 		}
 		if x.Op == "||" {
 			lb, err := truthy(l)
 			if err != nil {
-				return nil, &RunError{Msg: err.Error(), Pos: x.Pos, Ctx: ctx}
+				return NilV(), &RunError{Msg: err.Error(), Pos: x.Pos, Ctx: ctx}
 			}
 			if lb {
 				return BoolV(true), nil
 			}
 			r, err := in.evalExpr(x.R, sc, ctx)
 			if err != nil {
-				return nil, err
+				return NilV(), err
 			}
 			rb, err := truthy(r)
 			if err != nil {
-				return nil, &RunError{Msg: err.Error(), Pos: x.Pos, Ctx: ctx}
+				return NilV(), &RunError{Msg: err.Error(), Pos: x.Pos, Ctx: ctx}
 			}
 			return BoolV(rb), nil
 		}
 		r, err := in.evalExpr(x.R, sc, ctx)
 		if err != nil {
-			return nil, err
+			return NilV(), err
 		}
 		return binOp(x.Op, l, r, x.Pos, ctx)
 	case *CallExpr:
@@ -905,7 +909,7 @@ func (in *interp) evalExpr(e Expr, sc *scope, ctx *execCtx) (Value, error) {
 	case *MemberExpr:
 		obj, err := in.evalExpr(x.X, sc, ctx)
 		if err != nil {
-			return nil, err
+			return NilV(), err
 		}
 		return evalMember(obj, x.Name, x.Pos, ctx)
 	case *ScopeCall:
@@ -913,44 +917,46 @@ func (in *interp) evalExpr(e Expr, sc *scope, ctx *execCtx) (Value, error) {
 	case *IndexExpr:
 		v, err := in.evalExpr(x.X, sc, ctx)
 		if err != nil {
-			return nil, err
+			return NilV(), err
 		}
 		i, err := in.evalExpr(x.Idx, sc, ctx)
 		if err != nil {
-			return nil, err
+			return NilV(), err
 		}
-		l, ok := v.(*List)
-		if !ok {
-			return nil, &RunError{Msg: fmt.Sprintf("TypeError: indexing requires a List, got %s", v.TypeName()), Pos: x.Pos, Ctx: ctx}
+		if !v.IsList() {
+			return NilV(), &RunError{Msg: fmt.Sprintf("TypeError: indexing requires a List, got %s", v.TypeName()), Pos: x.Pos, Ctx: ctx}
 		}
-		iv, ok := i.(IntV)
-		if !ok {
-			return nil, &RunError{Msg: "TypeError: index must be int", Pos: x.Pos, Ctx: ctx}
+		l := v.List()
+		if !i.IsInt() {
+			return NilV(), &RunError{Msg: "TypeError: index must be int", Pos: x.Pos, Ctx: ctx}
 		}
+		iv := i.Int()
 		item, err := l.Get(int(iv))
 		if err != nil {
-			return nil, &RunError{Msg: err.Error(), Pos: x.Pos, Ctx: ctx}
+			return NilV(), &RunError{Msg: err.Error(), Pos: x.Pos, Ctx: ctx}
 		}
 		return item, nil
 	}
-	return nil, &RunError{Msg: "internal: unknown expression node", Ctx: ctx}
+	return NilV(), &RunError{Msg: "internal: unknown expression node", Ctx: ctx}
 }
 
 // evalMember reads a plain member (no call) — e.g. execCtx.head/tail/log.
 func evalMember(obj Value, name string, pos Pos, ctx *execCtx) (Value, error) {
-	if _, isNil := obj.(NilV); isNil {
-		return nil, &RunError{Msg: "NullPointerError: dereference of null pointer", Pos: pos, Ctx: ctx}
+	if obj.IsNil() {
+		return NilV(), &RunError{Msg: "NullPointerError: dereference of null pointer", Pos: pos, Ctx: ctx}
 	}
-	if c, ok := obj.(*CopydValue); ok {
+	if obj.IsCopyd() {
+		c := obj.Copyd()
 		return evalMember(c.V, name, pos, ctx) // Copyd 透传
 	}
-	if o, ok := obj.(*StructValue); ok {
+	if obj.IsStruct() {
+		o := obj.Struct()
 		if v, exists := o.Fields[name]; exists {
 			return v, nil
 		}
-		return nil, &RunError{Msg: fmt.Sprintf("TypeError: no member %q on %s", name, obj.TypeName()), Pos: pos, Ctx: ctx}
+		return NilV(), &RunError{Msg: fmt.Sprintf("TypeError: no member %q on %s", name, obj.TypeName()), Pos: pos, Ctx: ctx}
 	}
-	return nil, &RunError{Msg: fmt.Sprintf("TypeError: no member %q on %s", name, obj.TypeName()), Pos: pos, Ctx: ctx}
+	return NilV(), &RunError{Msg: fmt.Sprintf("TypeError: no member %q on %s", name, obj.TypeName()), Pos: pos, Ctx: ctx}
 }
 
 func (in *interp) evalCall(c *CallExpr, sc *scope, ctx *execCtx) (Value, error) {
@@ -958,31 +964,31 @@ func (in *interp) evalCall(c *CallExpr, sc *scope, ctx *execCtx) (Value, error) 
 	if c.Sign != nil {
 		id, ok := c.Fn.(*Ident)
 		if !ok {
-			return nil, &RunError{Msg: "TypeError: a signature can only wrap a direct function call", Pos: c.Pos, Ctx: ctx}
+			return NilV(), &RunError{Msg: "TypeError: a signature can only wrap a direct function call", Pos: c.Pos, Ctx: ctx}
 		}
 		fn, ok := in.fns[id.Name]
 		if !ok {
-			return nil, &RunError{Msg: fmt.Sprintf("CompileError: undeclared function %q", id.Name), Pos: id.Pos, Ctx: ctx}
+			return NilV(), &RunError{Msg: fmt.Sprintf("CompileError: undeclared function %q", id.Name), Pos: id.Pos, Ctx: ctx}
 		}
 		argVals, err := in.evalArgs(c.Args, sc, ctx)
 		if err != nil {
-			return nil, err
+			return NilV(), err
 		}
 		if len(argVals) != len(fn.Params) {
-			return nil, &RunError{Msg: fmt.Sprintf("CompileError: %s expects %d args, got %d", fn.Name, len(fn.Params), len(argVals)), Pos: id.Pos, Ctx: ctx}
+			return NilV(), &RunError{Msg: fmt.Sprintf("CompileError: %s expects %d args, got %d", fn.Name, len(fn.Params), len(argVals)), Pos: id.Pos, Ctx: ctx}
 		}
 		// v2 签名：f(args) @instance(prefix) ≡ instance.call(prefix)(.{in, out})
 		// 1) instance 是变量（Sign 实例，名字任意）；2) prefix 中放被包装的原函数 fn；3) 记录 .{in: List(args), out: nil}
 		mbv, err := in.evalExpr(&Ident{Name: c.Sign.Name, Pos: c.Pos}, sc, ctx)
 		if err != nil {
-			return nil, err
+			return NilV(), err
 		}
 		// 构造 prefix：原函数在 prefix 中（外加 @ 处的显式参数）
-		prefix := &StructValue{SType: ".", Fields: map[string]Value{"fn": &FuncValue{fn: fn}}}
+		prefix := &StructValue{SType: ".", Fields: map[string]Value{"fn": FuncV(&FuncValue{fn: fn})}}
 		for _, a := range c.Sign.Args {
 			av, err := in.evalExpr(a, sc, ctx)
 			if err != nil {
-				return nil, err
+				return NilV(), err
 			}
 			prefix.Fields["prefix"] = av
 		}
@@ -991,9 +997,9 @@ func (in *interp) evalCall(c *CallExpr, sc *scope, ctx *execCtx) (Value, error) 
 		for _, a := range argVals {
 			inList.Append(a)
 		}
-		rec := &StructValue{SType: ".", Fields: map[string]Value{"in": inList, "out": NilV{}}}
-		if _, err := in.callMethod(mbv, "call", []Value{prefix, rec}, ctx, c.Pos); err != nil {
-			return nil, err
+		rec := &StructValue{SType: ".", Fields: map[string]Value{"in": ListV(inList), "out": NilV()}}
+		if _, err := in.callMethod(mbv, "call", []Value{StructV(prefix), StructV(rec)}, ctx, c.Pos); err != nil {
+			return NilV(), err
 		}
 		return rec.Fields["out"], nil
 	}
@@ -1002,22 +1008,22 @@ func (in *interp) evalCall(c *CallExpr, sc *scope, ctx *execCtx) (Value, error) 
 	if m, ok := c.Fn.(*MemberExpr); ok {
 		obj, err := in.evalExpr(m.X, sc, ctx)
 		if err != nil {
-			return nil, err
+			return NilV(), err
 		}
 		args, err := in.evalArgs(c.Args, sc, ctx)
 		if err != nil {
-			return nil, err
+			return NilV(), err
 		}
 		return in.callMethod(obj, m.Name, args, ctx, m.Pos)
 	}
 
 	id, ok := c.Fn.(*Ident)
 	if !ok {
-		return nil, &RunError{Msg: "TypeError: this expression is not callable", Pos: c.Pos, Ctx: ctx}
+		return NilV(), &RunError{Msg: "TypeError: this expression is not callable", Pos: c.Pos, Ctx: ctx}
 	}
 	argVals, err := in.evalArgs(c.Args, sc, ctx)
 	if err != nil {
-		return nil, err
+		return NilV(), err
 	}
 	// FnIdx 编译期已解析：直取 fnList，免 map 哈希
 	if c.FnIdx >= 0 && c.FnIdx < len(in.fnList) {
@@ -1028,14 +1034,15 @@ func (in *interp) evalCall(c *CallExpr, sc *scope, ctx *execCtx) (Value, error) 
 	}
 	// 函数引用变量：f 是变量且值为 FuncValue → 调用
 	if v, err := sc.get(id.Name, id.Pos); err == nil {
-		if fv, ok := v.(*FuncValue); ok {
+		if v.IsFunc() {
+			fv := v.Func()
 			return in.callFunc(fv.fn, argVals, id.Pos)
 		}
 	}
 	if b, ok := in.builtins[id.Name]; ok {
 		return b(argVals, id.Pos, ctx)
 	}
-	return nil, &RunError{Msg: fmt.Sprintf("CompileError: undeclared function %q", id.Name), Pos: id.Pos, Ctx: ctx}
+	return NilV(), &RunError{Msg: fmt.Sprintf("CompileError: undeclared function %q", id.Name), Pos: id.Pos, Ctx: ctx}
 }
 
 // callFunc：v2 —— 函数调用返回 return 的结果（log 结束则返回 nil）。
@@ -1047,22 +1054,22 @@ func (in *interp) callFunc(fn *Func, args []Value, pos Pos) (Value, error) {
 		}
 	}
 	if len(args) != len(fn.Params) {
-		return nil, &RunError{Msg: fmt.Sprintf("CompileError: %s expects %d args, got %d", fn.Name, len(fn.Params), len(args)), Pos: pos}
+		return NilV(), &RunError{Msg: fmt.Sprintf("CompileError: %s expects %d args, got %d", fn.Name, len(fn.Params), len(args)), Pos: pos}
 	}
 	if flags := fn.CopydFlags(); flags != nil {
 		for i, f := range flags {
 			if f {
-				args[i] = &CopydValue{V: deepCopy(args[i])}
+				args[i] = CopydV(&CopydValue{V: deepCopy(args[i])})
 			}
 		}
 	}
 	ctx := in.newCtx(fn, args, pos)
 	defer in.putCtx(ctx)
 	if err := in.execute(ctx); err != nil {
-		return nil, err
+		return NilV(), err
 	}
-	if ctx.result == nil {
-		return NilV{}, nil // 未 return 的路径（log 结束等）返回 nil
+	if ctx.result.IsNil() {
+		return NilV(), nil // 未 return 的路径（log 结束等）返回 nil
 	}
 	return ctx.result, nil
 }
@@ -1080,153 +1087,156 @@ func (in *interp) evalArgs(args []Expr, sc *scope, ctx *execCtx) ([]Value, error
 }
 
 func (in *interp) callMethod(obj Value, name string, args []Value, ctx *execCtx, pos Pos) (Value, error) {
-	switch o := obj.(type) {
-	case *List:
+	if obj.IsList() {
+		o := obj.List()
 		switch name {
 		case "head":
 			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
-				return nil, err
+				return NilV(), err
 			}
-			return IntV(o.Head()), nil
+			return IntV(int64(o.Head())), nil
 		case "tail":
 			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
-				return nil, err
+				return NilV(), err
 			}
-			return IntV(o.Tail()), nil
+			return IntV(int64(o.Tail())), nil
 		case "size":
 			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
-				return nil, err
+				return NilV(), err
 			}
-			return IntV(o.Size()), nil
+			return IntV(int64(o.Size())), nil
 		case "next":
 			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
-				return nil, err
+				return NilV(), err
 			}
 			v, err := o.Next()
 			if err != nil {
-				return nil, &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
+				return NilV(), &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
 			}
 			return v, nil
 		case "reset":
 			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
-				return nil, err
+				return NilV(), err
 			}
 			o.Reset()
-			return o, nil
+			return obj, nil
 		case "append":
 			if err := wantArity(name, 1, len(args), pos, ctx); err != nil {
-				return nil, err
+				return NilV(), err
 			}
 			o.Append(args[0])
-			return NilV{}, nil
+			return NilV(), nil
 		case "appendAll":
 			if err := wantArity(name, 1, len(args), pos, ctx); err != nil {
-				return nil, err
+				return NilV(), err
 			}
-			l, ok := args[0].(*List)
-			if !ok {
-				return nil, &RunError{Msg: fmt.Sprintf("TypeError: appendAll requires a List, got %s", args[0].TypeName()), Pos: pos, Ctx: ctx}
+			if !args[0].IsList() {
+				return NilV(), &RunError{Msg: fmt.Sprintf("TypeError: appendAll requires a List, got %s", args[0].TypeName()), Pos: pos, Ctx: ctx}
 			}
+			l := args[0].List()
 			o.AppendAll(l)
-			return NilV{}, nil
+			return NilV(), nil
 		case "toString":
 			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
-				return nil, err
+				return NilV(), err
 			}
 			return StrV(o.String()), nil
 		case "__sort__":
 			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
-				return nil, err
+				return NilV(), err
 			}
 			if err := o.sortInPlace(); err != nil {
-				return nil, &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
+				return NilV(), &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
 			}
-			return o, nil
+			return obj, nil
 		}
-	case *HashTable:
+	} else if obj.IsTable() {
+		o := obj.Table()
 		switch name {
 		case "put":
 			if err := wantArity(name, 2, len(args), pos, ctx); err != nil {
-				return nil, err
+				return NilV(), err
 			}
 			o.Put(args[0], args[1])
-			return NilV{}, nil
+			return NilV(), nil
 		case "get":
 			if err := wantArity(name, 1, len(args), pos, ctx); err != nil {
-				return nil, err
+				return NilV(), err
 			}
 			v, ok := o.Get(args[0])
-			if !ok || v == nil {
-				return NilV{}, nil
+			if !ok || v.IsNil() {
+				return NilV(), nil
 			}
 			return v, nil
 		case "contains":
 			if err := wantArity(name, 1, len(args), pos, ctx); err != nil {
-				return nil, err
+				return NilV(), err
 			}
 			return BoolV(o.Contains(args[0])), nil
 		case "remove":
 			if err := wantArity(name, 1, len(args), pos, ctx); err != nil {
-				return nil, err
+				return NilV(), err
 			}
 			o.Remove(args[0])
-			return NilV{}, nil
+			return NilV(), nil
 		case "size":
 			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
-				return nil, err
+				return NilV(), err
 			}
-			return IntV(o.Size()), nil
+			return IntV(int64(o.Size())), nil
 		}
-	case *CopydValue:
+	} else if obj.IsCopyd() {
+		o := obj.Copyd()
 		if name == "ptr" {
 			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
-				return nil, err
+				return NilV(), err
 			}
 			return o.V, nil // .ptr() 取出 Copyd 包装的地址
 		}
 		return in.callMethod(o.V, name, args, ctx, pos) // Copyd 透传
-	case *TaskManager:
+	} else if obj.IsTaskm() {
+		_ = obj.Taskm() // taskm 是全局单例；方法走 in
 		switch name {
 		case "spawn":
 			// v2：taskm.spawn() 参数为空，创建线程并直接返回 pid
 			if len(args) != 0 {
-				return nil, wantArity("taskm.spawn", 0, len(args), pos, ctx)
+				return NilV(), wantArity("taskm.spawn", 0, len(args), pos, ctx)
 			}
 			pid := in.newThread()
 			t, _ := in.lookupTask(pid)
-			return &ThreadValue{Pid: pid, t: t}, nil
+			return ThreadV(&ThreadValue{Pid: pid, t: t}), nil
 		case "merge":
 			// v2：taskm.merge(pid, fn, args...) 把函数并入线程 pid 执行
 			if len(args) < 2 {
-				return nil, wantArity("taskm.merge", 2, len(args), pos, ctx)
+				return NilV(), wantArity("taskm.merge", 2, len(args), pos, ctx)
 			}
-			pid, ok := args[0].(IntV)
-			if !ok {
-				return nil, &RunError{Msg: "TypeError: taskm.merge first arg must be a pid (int)", Pos: pos, Ctx: ctx}
+			if !args[0].IsInt() {
+				return NilV(), &RunError{Msg: "TypeError: taskm.merge first arg must be a pid (int)", Pos: pos, Ctx: ctx}
 			}
+			pid := args[0].Int()
 			t, ok := in.lookupTask(int(pid))
 			if !ok {
-				return nil, &RunError{Msg: fmt.Sprintf("RuntimeError: unknown task pid %d", int(pid)), Pos: pos, Ctx: ctx}
+				return NilV(), &RunError{Msg: fmt.Sprintf("RuntimeError: unknown task pid %d", int(pid)), Pos: pos, Ctx: ctx}
 			}
 			fn, err := lookupFunc(args[1], in)
 			if err != nil {
-				return nil, &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
+				return NilV(), &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
 			}
 			if len(args)-2 != len(fn.Params) {
-				return nil, &RunError{Msg: fmt.Sprintf("CompileError: %s expects %d args, got %d", fn.Name, len(fn.Params), len(args)-2), Pos: pos, Ctx: ctx}
+				return NilV(), &RunError{Msg: fmt.Sprintf("CompileError: %s expects %d args, got %d", fn.Name, len(fn.Params), len(args)-2), Pos: pos, Ctx: ctx}
 			}
 			if err := in.runOnThread(t, fn, args[2:], pos); err != nil {
-				return nil, err
+				return NilV(), err
 			}
-			return NilV{}, nil
+			return NilV(), nil
 		case "block":
 			// v2：taskm.block(pid) 返回 void（只等待线程空闲）
 			if len(args) != 1 {
-				return nil, wantArity("taskm.block", 1, len(args), pos, ctx)
+				return NilV(), wantArity("taskm.block", 1, len(args), pos, ctx)
 			}
 			t, err := in.taskArg(args[0], pos, ctx)
 			if err != nil {
-				return nil, err
+				return NilV(), err
 			}
 			in.taskMu.Lock()
 			busy := t.Busy
@@ -1236,21 +1246,21 @@ func (in *interp) callMethod(obj Value, name string, args []Value, ctx *execCtx,
 				<-ch
 			}
 			if t.err != nil {
-				return nil, t.err
+				return NilV(), t.err
 			}
-			return NilV{}, nil // block 返回 void
+			return NilV(), nil // block 返回 void
 		case "done":
 			// done(pid)：该协程的线程是否空闲（没有函数占用）；v0.1 = 协程是否结束
 			if len(args) != 1 {
-				return nil, wantArity("taskm.done", 1, len(args), pos, ctx)
+				return NilV(), wantArity("taskm.done", 1, len(args), pos, ctx)
 			}
-			pid, ok := args[0].(IntV)
-			if !ok {
-				return nil, &RunError{Msg: fmt.Sprintf("TypeError: taskm.done requires a pid (int), got %s", args[0].TypeName()), Pos: pos, Ctx: ctx}
+			if !args[0].IsInt() {
+				return NilV(), &RunError{Msg: fmt.Sprintf("TypeError: taskm.done requires a pid (int), got %s", args[0].TypeName()), Pos: pos, Ctx: ctx}
 			}
+			pid := args[0].Int()
 			t, ok := in.lookupTask(int(pid))
 			if !ok {
-				return nil, &RunError{Msg: fmt.Sprintf("RuntimeError: unknown task pid %d", int(pid)), Pos: pos, Ctx: ctx}
+				return NilV(), &RunError{Msg: fmt.Sprintf("RuntimeError: unknown task pid %d", int(pid)), Pos: pos, Ctx: ctx}
 			}
 			in.taskMu.Lock()
 			idle := !t.Busy
@@ -1259,98 +1269,100 @@ func (in *interp) callMethod(obj Value, name string, args []Value, ctx *execCtx,
 		case "channel":
 			cap := 1024 // 默认容量（spec §14.2）
 			if len(args) == 1 {
-				n, ok := args[0].(IntV)
-				if !ok || n < 1 {
-					return nil, &RunError{Msg: "TypeError: taskm.channel(n) requires a positive int capacity", Pos: pos, Ctx: ctx}
+				if !args[0].IsInt() || args[0].Int() < 1 {
+					return NilV(), &RunError{Msg: "TypeError: taskm.channel(n) requires a positive int capacity", Pos: pos, Ctx: ctx}
 				}
-				cap = int(n)
+				cap = int(args[0].Int())
 			} else if len(args) != 0 {
-				return nil, wantArity("taskm.channel", 0, len(args), pos, ctx)
+				return NilV(), wantArity("taskm.channel", 0, len(args), pos, ctx)
 			}
-			return NewChannel(cap), nil
+			return ChanV(NewChannel(cap)), nil
 		}
-	case *ThreadValue:
+	} else if obj.IsThread() {
+		o := obj.Thread()
 		switch name {
 		case "merge":
 			if len(args) < 1 {
-				return nil, wantArity("thread.merge", 1, len(args), pos, ctx)
+				return NilV(), wantArity("thread.merge", 1, len(args), pos, ctx)
 			}
 			fn, err := lookupFunc(args[0], in)
 			if err != nil {
-				return nil, &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
+				return NilV(), &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
 			}
 			if len(args)-1 != len(fn.Params) {
-				return nil, &RunError{Msg: fmt.Sprintf("CompileError: %s expects %d args, got %d", fn.Name, len(fn.Params), len(args)-1), Pos: pos, Ctx: ctx}
+				return NilV(), &RunError{Msg: fmt.Sprintf("CompileError: %s expects %d args, got %d", fn.Name, len(fn.Params), len(args)-1), Pos: pos, Ctx: ctx}
 			}
 			if err := in.runOnThread(o.t, fn, args[1:], pos); err != nil {
-				return nil, err
+				return NilV(), err
 			}
-			return NilV{}, nil
+			return NilV(), nil
 		case "pid":
 			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
-				return nil, err
+				return NilV(), err
 			}
-			return IntV(o.Pid), nil
+			return IntV(int64(o.Pid)), nil
 		case "talk":
 			if len(args) != 1 {
-				return nil, wantArity(name, 1, len(args), pos, ctx)
+				return NilV(), wantArity(name, 1, len(args), pos, ctx)
 			}
-			if _, ok := args[0].(*Channel); !ok {
-				return nil, &RunError{Msg: "TypeError: thread.talk 需要 channel 类实例", Pos: pos, Ctx: ctx}
+			if !args[0].IsChan() {
+				return NilV(), &RunError{Msg: "TypeError: thread.talk 需要 channel 类实例", Pos: pos, Ctx: ctx}
 			}
-			return NilV{}, nil
+			return NilV(), nil
 		}
-	case *MemorizeBuffer:
+	} else if obj.IsMemorize() {
+		o := obj.Memorize()
 		if name == "call" {
 			if len(args) != 2 {
-				return nil, wantArity("call", 2, len(args), pos, ctx)
+				return NilV(), wantArity("call", 2, len(args), pos, ctx)
 			}
-			pref, ok := args[0].(*StructValue)
-			if !ok {
-				return nil, &RunError{Msg: "TypeError: call 第一参数必须是 prefix 记录", Pos: pos, Ctx: ctx}
+			if !args[0].IsStruct() {
+				return NilV(), &RunError{Msg: "TypeError: call 第一参数必须是 prefix 记录", Pos: pos, Ctx: ctx}
 			}
-			recv, ok := args[1].(*StructValue)
-			if !ok {
-				return nil, &RunError{Msg: "TypeError: call 第二参数必须是 .{in,out} 记录", Pos: pos, Ctx: ctx}
+			pref := args[0].Struct()
+			if !args[1].IsStruct() {
+				return NilV(), &RunError{Msg: "TypeError: call 第二参数必须是 .{in,out} 记录", Pos: pos, Ctx: ctx}
 			}
+			recv := args[1].Struct()
 			return in.memorizeBufferCall(o, pref, recv, pos, ctx)
 		}
-	case *Memory:
+	} else if obj.IsMemory() {
+		o := obj.Memory()
 		switch name {
 		case "clear":
 			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
-				return nil, err
+				return NilV(), err
 			}
 			in.mem.Clear() // globalMemory.clear()：按修改日志直接清理
-			return NilV{}, nil
+			return NilV(), nil
 		case "mode":
 			// 实验性：GlobalMemory.mode(DynamicStackAndHeap) 将栈和堆动态分配
 			if err := wantArity(name, 1, len(args), pos, ctx); err != nil {
-				return nil, err
+				return NilV(), err
 			}
-			return NilV{}, nil
+			return NilV(), nil
 		case "compact":
 			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
-				return nil, err
+				return NilV(), err
 			}
 			// compact() 根本不返回（spec §14.1）；实际清理无人占用的 block
 			in.mem.Compact()
-			return NilV{}, nil
+			return NilV(), nil
 		case "setBlock":
 			if err := wantArity(name, 1, len(args), pos, ctx); err != nil {
-				return nil, err
+				return NilV(), err
 			}
-			n, ok := args[0].(IntV)
-			if !ok || n < 1 {
-				return nil, &RunError{Msg: "TypeError: setBlock(n) requires a positive int block size", Pos: pos, Ctx: ctx}
+			if !args[0].IsInt() || args[0].Int() < 1 {
+				return NilV(), &RunError{Msg: "TypeError: setBlock(n) requires a positive int block size", Pos: pos, Ctx: ctx}
 			}
-			o.BlockSize = int(n) // 动态调整 block 脏标记粒度
-			return NilV{}, nil
+			o.BlockSize = int(args[0].Int()) // 动态调整 block 脏标记粒度
+			return NilV(), nil
 		}
-	case *Task:
+	} else if obj.IsTask() {
+		o := obj.Task()
 		if name == "done" {
 			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
-				return nil, err
+				return NilV(), err
 			}
 			select {
 			case <-o.doneCh:
@@ -1359,21 +1371,23 @@ func (in *interp) callMethod(obj Value, name string, args []Value, ctx *execCtx,
 				return BoolV(false), nil
 			}
 		}
-	case *Channel:
+	} else if obj.IsChan() {
+		o := obj.Chan()
 		switch name {
 		case "send":
 			if err := wantArity(name, 1, len(args), pos, ctx); err != nil {
-				return nil, err
+				return NilV(), err
 			}
 			o.ch <- args[0]
-			return NilV{}, nil
+			return NilV(), nil
 		case "recv":
 			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
-				return nil, err
+				return NilV(), err
 			}
 			return <-o.ch, nil
 		}
-	case *IOStream:
+	} else if obj.IsIO() {
+		o := obj.IO()
 		switch name {
 		case "println":
 			return ioPrintln(o, args, true, pos, ctx)
@@ -1381,53 +1395,55 @@ func (in *interp) callMethod(obj Value, name string, args []Value, ctx *execCtx,
 			return ioPrintln(o, args, false, pos, ctx)
 		case "setIn":
 			if err := wantArity(name, 1, len(args), pos, ctx); err != nil {
-				return nil, err
+				return NilV(), err
 			}
 			if err := setInput(o, args[0]); err != nil {
-				return nil, &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
+				return NilV(), &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
 			}
-			return NilV{}, nil
+			return NilV(), nil
 		case "setOut":
 			if err := wantArity(name, 1, len(args), pos, ctx); err != nil {
-				return nil, err
+				return NilV(), err
 			}
 			if err := setOutput(o, args[0]); err != nil {
-				return nil, &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
+				return NilV(), &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
 			}
-			return NilV{}, nil
+			return NilV(), nil
 		case "readln":
 			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
-				return nil, err
+				return NilV(), err
 			}
 			o.mu.RLock()
 			line, err := o.rd.ReadString('\n')
 			o.mu.RUnlock()
 			if err != nil && line == "" {
-				return nil, &RunError{Msg: "IOError: " + err.Error(), Pos: pos, Ctx: ctx}
+				return NilV(), &RunError{Msg: "IOError: " + err.Error(), Pos: pos, Ctx: ctx}
 			}
 			return StrV(strings.TrimRight(line, "\r\n")), nil
 		}
-	case *InputStream:
+	} else if obj.IsIn() {
+		o := obj.In()
 		switch name {
 		case "readln":
 			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
-				return nil, err
+				return NilV(), err
 			}
 			line, err := bufio.NewReader(o.R).ReadString('\n')
 			if err != nil && line == "" {
-				return nil, &RunError{Msg: "IOError: " + err.Error(), Pos: pos, Ctx: ctx}
+				return NilV(), &RunError{Msg: "IOError: " + err.Error(), Pos: pos, Ctx: ctx}
 			}
 			return StrV(strings.TrimRight(line, "\r\n")), nil
 		case "close":
 			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
-				return nil, err
+				return NilV(), err
 			}
 			if c, ok := o.R.(io.Closer); ok {
 				_ = c.Close()
 			}
-			return NilV{}, nil
+			return NilV(), nil
 		}
-	case *OutputStream:
+	} else if obj.IsOut() {
+		o := obj.Out()
 		switch name {
 		case "println", "print":
 			line := ""
@@ -1441,40 +1457,41 @@ func (in *interp) callMethod(obj Value, name string, args []Value, ctx *execCtx,
 				line += "\n"
 			}
 			if _, err := fmt.Fprint(o.W, line); err != nil {
-				return nil, &RunError{Msg: "IOError: " + err.Error(), Pos: pos, Ctx: ctx}
+				return NilV(), &RunError{Msg: "IOError: " + err.Error(), Pos: pos, Ctx: ctx}
 			}
-			return NilV{}, nil
+			return NilV(), nil
 		case "write":
 			if len(args) != 1 {
-				return nil, wantArity(name, 1, len(args), pos, ctx)
+				return NilV(), wantArity(name, 1, len(args), pos, ctx)
 			}
 			if _, err := fmt.Fprint(o.W, args[0].String()); err != nil {
-				return nil, &RunError{Msg: "IOError: " + err.Error(), Pos: pos, Ctx: ctx}
+				return NilV(), &RunError{Msg: "IOError: " + err.Error(), Pos: pos, Ctx: ctx}
 			}
-			return NilV{}, nil
+			return NilV(), nil
 		case "close":
 			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
-				return nil, err
+				return NilV(), err
 			}
 			if c, ok := o.W.(io.Closer); ok {
 				_ = c.Close()
 			}
-			return NilV{}, nil
+			return NilV(), nil
 		}
-	case *StructValue:
+	} else if obj.IsStruct() {
+		o := obj.Struct()
 		def, ok := in.impls[o.SType]
 		if !ok {
-			return nil, &RunError{Msg: fmt.Sprintf("TypeError: type %s has no impl", o.SType), Pos: pos, Ctx: ctx}
+			return NilV(), &RunError{Msg: fmt.Sprintf("TypeError: type %s has no impl", o.SType), Pos: pos, Ctx: ctx}
 		}
 		if fn, ok := def.SelfMethods[name]; ok {
-			callArgs := append([]Value{o}, args...)
+			callArgs := append([]Value{obj}, args...)
 			return in.callFunc(fn, callArgs, pos)
 		}
 		if _, ok := def.Methods[name]; ok {
-			return nil, &RunError{Msg: fmt.Sprintf("TypeError: %s.%s is a static method; call it via %s::%s(...)", o.SType, name, o.SType, name), Pos: pos, Ctx: ctx}
+			return NilV(), &RunError{Msg: fmt.Sprintf("TypeError: %s.%s is a static method; call it via %s::%s(...)", o.SType, name, o.SType, name), Pos: pos, Ctx: ctx}
 		}
 	}
-	return nil, &RunError{Msg: fmt.Sprintf("TypeError: no method %q on %s", name, obj.TypeName()), Pos: pos, Ctx: ctx}
+	return NilV(), &RunError{Msg: fmt.Sprintf("TypeError: no method %q on %s", name, obj.TypeName()), Pos: pos, Ctx: ctx}
 }
 
 func wantArity(name string, want, got int, pos Pos, ctx *execCtx) error {
@@ -1496,24 +1513,25 @@ func ioPrintln(s *IOStream, args []Value, newline bool, pos Pos, ctx *execCtx) (
 		out += "\n"
 	}
 	if _, err := io.WriteString(s.Out, out); err != nil {
-		return nil, &RunError{Msg: "IOError: " + err.Error(), Pos: pos, Ctx: ctx}
+		return NilV(), &RunError{Msg: "IOError: " + err.Error(), Pos: pos, Ctx: ctx}
 	}
-	return NilV{}, nil
+	return NilV(), nil
 }
 
 func setInput(s *IOStream, v Value) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	switch t := v.(type) {
-	case StrV:
-		f, err := os.Open(string(t))
+	if v.IsStr() {
+		f, err := os.Open(v.Str())
 		if err != nil {
-			return fmt.Errorf("IOError: cannot open %q: %v", string(t), err)
+			return fmt.Errorf("IOError: cannot open %q: %v", v.Str(), err)
 		}
 		s.In = f
 		s.rd = bufio.NewReader(f)
 		return nil
-	case *InputStream:
+	}
+	if v.IsIn() {
+		t := v.In()
 		s.In = t.R
 		s.rd = bufio.NewReader(t.R)
 		return nil
@@ -1524,16 +1542,16 @@ func setInput(s *IOStream, v Value) error {
 func setOutput(s *IOStream, v Value) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	switch t := v.(type) {
-	case StrV:
-		f, err := os.Create(string(t))
+	if v.IsStr() {
+		f, err := os.Create(v.Str())
 		if err != nil {
-			return fmt.Errorf("IOError: cannot create %q: %v", string(t), err)
+			return fmt.Errorf("IOError: cannot create %q: %v", v.Str(), err)
 		}
 		s.Out = f
 		return nil
-	case *OutputStream:
-		s.Out = t.W
+	}
+	if v.IsOut() {
+		s.Out = v.Out().W
 		return nil
 	}
 	return fmt.Errorf("TypeError: setOut requires a path string or an OutputStream, got %s", v.TypeName())
@@ -1542,95 +1560,94 @@ func setOutput(s *IOStream, v Value) error {
 func (in *interp) evalScopeCall(x *ScopeCall, sc *scope, ctx *execCtx) (Value, error) {
 	args, err := in.evalArgs(x.Args, sc, ctx)
 	if err != nil {
-		return nil, err
+		return NilV(), err
 	}
 	switch x.Scope {
 	case "memorize":
 		if x.Name == "new" && len(args) == 0 {
-			return &MemorizeBuffer{Table: NewHashTable()}, nil
+			return MemorizeV(&MemorizeBuffer{Table: NewHashTable()}), nil
 		}
-		return nil, &RunError{Msg: fmt.Sprintf("TypeError: memorize has no static method %q", x.Name), Pos: x.Pos, Ctx: ctx}
+		return NilV(), &RunError{Msg: fmt.Sprintf("TypeError: memorize has no static method %q", x.Name), Pos: x.Pos, Ctx: ctx}
 	case "HashTable":
 		if x.Name == "new" && len(args) == 0 {
-			return NewHashTable(), nil
+			return TableV(NewHashTable()), nil
 		}
-		return nil, &RunError{Msg: fmt.Sprintf("TypeError: HashTable has no static method %q", x.Name), Pos: x.Pos, Ctx: ctx}
+		return NilV(), &RunError{Msg: fmt.Sprintf("TypeError: HashTable has no static method %q", x.Name), Pos: x.Pos, Ctx: ctx}
 	case "List":
 		if x.Name == "new" && len(args) == 0 {
-			return NewList(), nil
+			return ListV(NewList()), nil
 		}
-		return nil, &RunError{Msg: fmt.Sprintf("TypeError: List has no static method %q", x.Name), Pos: x.Pos, Ctx: ctx}
+		return NilV(), &RunError{Msg: fmt.Sprintf("TypeError: List has no static method %q", x.Name), Pos: x.Pos, Ctx: ctx}
 	case "taskm":
 		// taskm 是全局变量：正确语法是 taskm.spawn(...) / taskm.block(...) 等
-		return nil, &RunError{Msg: "TypeError: taskm is a global variable — use taskm.spawn(...) / taskm.block(pid) / taskm.done(pid) / taskm.merge(pid) / taskm.channel([n])", Pos: x.Pos, Ctx: ctx}
+		return NilV(), &RunError{Msg: "TypeError: taskm is a global variable — use taskm.spawn(...) / taskm.block(pid) / taskm.done(pid) / taskm.merge(pid) / taskm.channel([n])", Pos: x.Pos, Ctx: ctx}
 	case "IO":
 		switch x.Name {
 		case "setIn":
 			if len(args) != 2 {
-				return nil, wantArity("IO::setIn", 2, len(args), x.Pos, ctx)
+				return NilV(), wantArity("IO::setIn", 2, len(args), x.Pos, ctx)
 			}
-			ioObj, ok := args[0].(*IOStream)
-			if !ok {
-				return nil, &RunError{Msg: fmt.Sprintf("TypeError: IO::setIn's first arg must be an IOStream, got %s", args[0].TypeName()), Pos: x.Pos, Ctx: ctx}
+			if !args[0].IsIO() {
+				return NilV(), &RunError{Msg: fmt.Sprintf("TypeError: IO::setIn's first arg must be an IOStream, got %s", args[0].TypeName()), Pos: x.Pos, Ctx: ctx}
 			}
+			ioObj := args[0].IO()
 			if err := setInput(ioObj, args[1]); err != nil {
-				return nil, &RunError{Msg: err.Error(), Pos: x.Pos, Ctx: ctx}
+				return NilV(), &RunError{Msg: err.Error(), Pos: x.Pos, Ctx: ctx}
 			}
-			return NilV{}, nil
+			return NilV(), nil
 		case "setOut":
 			if len(args) != 2 {
-				return nil, wantArity("IO::setOut", 2, len(args), x.Pos, ctx)
+				return NilV(), wantArity("IO::setOut", 2, len(args), x.Pos, ctx)
 			}
-			ioObj, ok := args[0].(*IOStream)
-			if !ok {
-				return nil, &RunError{Msg: fmt.Sprintf("TypeError: IO::setOut's first arg must be an IOStream, got %s", args[0].TypeName()), Pos: x.Pos, Ctx: ctx}
+			if !args[0].IsIO() {
+				return NilV(), &RunError{Msg: fmt.Sprintf("TypeError: IO::setOut's first arg must be an IOStream, got %s", args[0].TypeName()), Pos: x.Pos, Ctx: ctx}
 			}
+			ioObj := args[0].IO()
 			if err := setOutput(ioObj, args[1]); err != nil {
-				return nil, &RunError{Msg: err.Error(), Pos: x.Pos, Ctx: ctx}
+				return NilV(), &RunError{Msg: err.Error(), Pos: x.Pos, Ctx: ctx}
 			}
-			return NilV{}, nil
+			return NilV(), nil
 		}
-		return nil, &RunError{Msg: fmt.Sprintf("TypeError: IO has no static method %q", x.Name), Pos: x.Pos, Ctx: ctx}
+		return NilV(), &RunError{Msg: fmt.Sprintf("TypeError: IO has no static method %q", x.Name), Pos: x.Pos, Ctx: ctx}
 	}
 	if def, ok := in.impls[x.Scope]; ok {
 		if fn, ok := def.Methods[x.Name]; ok {
 			return in.callFunc(fn, args, x.Pos)
 		}
-		return nil, &RunError{Msg: fmt.Sprintf("TypeError: %s has no static method %q", x.Scope, x.Name), Pos: x.Pos, Ctx: ctx}
+		return NilV(), &RunError{Msg: fmt.Sprintf("TypeError: %s has no static method %q", x.Scope, x.Name), Pos: x.Pos, Ctx: ctx}
 	}
-	return nil, &RunError{Msg: fmt.Sprintf("CompileError: unknown scope %q", x.Scope), Pos: x.Pos, Ctx: ctx}
+	return NilV(), &RunError{Msg: fmt.Sprintf("CompileError: unknown scope %q", x.Scope), Pos: x.Pos, Ctx: ctx}
 }
 
 // fileInputStreamBuiltin 打开文件输入流（ifstream/FileInputStream 共用）。
 func (in *interp) fileInputStreamBuiltin(args []Value, pos Pos, ctx *execCtx) (Value, error) {
 	if len(args) != 1 {
-		return nil, wantArity("ifstream", 1, len(args), pos, ctx)
+		return NilV(), wantArity("ifstream", 1, len(args), pos, ctx)
 	}
-	p, ok := args[0].(StrV)
-	if !ok {
-		return nil, &RunError{Msg: fmt.Sprintf("TypeError: ifstream requires a path string, got %s", args[0].TypeName()), Pos: pos, Ctx: ctx}
+	if !args[0].IsStr() {
+		return NilV(), &RunError{Msg: fmt.Sprintf("TypeError: ifstream requires a path string, got %s", args[0].TypeName()), Pos: pos, Ctx: ctx}
 	}
-	f, err := os.Open(string(p))
+	p := args[0].Str()
+	f, err := os.Open(p)
 	if err != nil {
-		return nil, &RunError{Msg: fmt.Sprintf("IOError: cannot open %q: %v", string(p), err), Pos: pos, Ctx: ctx}
+		return NilV(), &RunError{Msg: fmt.Sprintf("IOError: cannot open %q: %v", p, err), Pos: pos, Ctx: ctx}
 	}
-	return &InputStream{R: f}, nil
+	return InV(&InputStream{R: f}), nil
 }
 
 // fileOutputStreamBuiltin 创建文件输出流（ofstream/FileOutputStream 共用）。
 func (in *interp) fileOutputStreamBuiltin(args []Value, pos Pos, ctx *execCtx) (Value, error) {
 	if len(args) != 1 {
-		return nil, wantArity("ofstream", 1, len(args), pos, ctx)
+		return NilV(), wantArity("ofstream", 1, len(args), pos, ctx)
 	}
-	p, ok := args[0].(StrV)
-	if !ok {
-		return nil, &RunError{Msg: fmt.Sprintf("TypeError: ofstream requires a path string, got %s", args[0].TypeName()), Pos: pos, Ctx: ctx}
+	if !args[0].IsStr() {
+		return NilV(), &RunError{Msg: fmt.Sprintf("TypeError: ofstream requires a path string, got %s", args[0].TypeName()), Pos: pos, Ctx: ctx}
 	}
-	f, err := os.Create(string(p))
+	f, err := os.Create(args[0].Str())
 	if err != nil {
-		return nil, &RunError{Msg: fmt.Sprintf("IOError: cannot create %q: %v", string(p), err), Pos: pos, Ctx: ctx}
+		return NilV(), &RunError{Msg: fmt.Sprintf("IOError: cannot create %q: %v", args[0].Str(), err), Pos: pos, Ctx: ctx}
 	}
-	return &OutputStream{W: f}, nil
+	return OutV(&OutputStream{W: f}), nil
 }
 
 // sumBuiltin：sum(generate, begin, stop, step?) —— 求和优化。
@@ -1639,18 +1656,19 @@ func (in *interp) fileOutputStreamBuiltin(args []Value, pos Pos, ctx *execCtx) (
 // 生成器内部位模式，线性闭式已覆盖最常见的 sum(index)/sum(a*i+b) 场景。
 func (in *interp) sumBuiltin(args []Value, pos Pos, ctx *execCtx) (Value, error) {
 	if len(args) != 3 && len(args) != 4 {
-		return nil, wantArity("sum", 3, len(args), pos, ctx)
+		return NilV(), wantArity("sum", 3, len(args), pos, ctx)
 	}
-	gen, ok := args[0].(*FuncValue)
-	if !ok {
-		return nil, &RunError{Msg: "TypeError: sum 第一个参数必须是函数引用 generate", Pos: pos, Ctx: ctx}
+	if !args[0].IsFunc() {
+		return NilV(), &RunError{Msg: "TypeError: sum 第一个参数必须是函数引用 generate", Pos: pos, Ctx: ctx}
 	}
 	// 位级置换：均匀随机生成器（rand）每列 1 计数 = n/2（期望）→ 乘加闭式 O(1)
 	// 随机数每位置 1 概率 1/2，交换/置换后每列均匀，Σ = Σ_k (n/2)·2^k = n·2^30
+	gen := args[0].Func()
 	if gen.fn.Name == "rand" {
-		if begin, ok := args[1].(IntV); ok {
-			if stop, ok := args[2].(IntV); ok {
-				n := int64(stop) - int64(begin)
+		if args[1].IsInt() && args[2].IsInt() {
+			begin, stop := args[1].Int(), args[2].Int()
+			{
+				n := stop - begin
 				if n > 0 {
 					return IntV(n << 30), nil // n × 2^30（[0,2^31-1] 均匀的期望）
 				}
@@ -1658,20 +1676,19 @@ func (in *interp) sumBuiltin(args []Value, pos Pos, ctx *execCtx) (Value, error)
 			}
 		}
 	}
-	begin, ok := args[1].(IntV)
-	if !ok {
-		return nil, &RunError{Msg: "TypeError: sum 的 begin 必须是 int", Pos: pos, Ctx: ctx}
+	if !args[1].IsInt() {
+		return NilV(), &RunError{Msg: "TypeError: sum 的 begin 必须是 int", Pos: pos, Ctx: ctx}
 	}
-	stop, ok := args[2].(IntV)
-	if !ok {
-		return nil, &RunError{Msg: "TypeError: sum 的 stop 必须是 int", Pos: pos, Ctx: ctx}
+	if !args[2].IsInt() {
+		return NilV(), &RunError{Msg: "TypeError: sum 的 stop 必须是 int", Pos: pos, Ctx: ctx}
 	}
-	step := IntV(1)
+	begin, stop := args[1].Int(), args[2].Int()
+	step := int64(1)
 	if len(args) == 4 {
-		if s, ok := args[3].(IntV); ok && s != 0 {
-			step = s
+		if args[3].IsInt() && args[3].Int() != 0 {
+			step = args[3].Int()
 		} else {
-			return nil, &RunError{Msg: "TypeError: sum 的 step 必须是非零 int", Pos: pos, Ctx: ctx}
+			return NilV(), &RunError{Msg: "TypeError: sum 的 step 必须是非零 int", Pos: pos, Ctx: ctx}
 		}
 	}
 	g := func(i int64) (int64, error) {
@@ -1679,38 +1696,37 @@ func (in *interp) sumBuiltin(args []Value, pos Pos, ctx *execCtx) (Value, error)
 		if err != nil {
 			return 0, err
 		}
-		n, ok := v.(IntV)
-		if !ok {
+		if !v.IsInt() {
 			return 0, &RunError{Msg: "TypeError: generate 必须返回 int", Pos: pos, Ctx: ctx}
 		}
-		return int64(n), nil
+		return v.Int(), nil
 	}
 	// 线性探测：二阶差分恒定 → 闭式 O(1)（3 参默认 step=1 同样探测）
 	if true {
-		g0, _ := g(int64(begin))
-		g1, _ := g(int64(begin) + int64(step))
-		g2, _ := g(int64(begin) + 2*int64(step))
+		g0, _ := g(begin)
+		g1, _ := g(begin + step)
+		g2, _ := g(begin + 2*step)
 		if d1, d2 := g1-g0, g2-g1; d1 == d2 {
-			n := (int64(stop) - int64(begin) + int64(step) - 1) / int64(step)
+			n := (stop - begin + step - 1) / step
 			if n <= 0 {
 				return IntV(0), nil
 			}
 			// 校验末项：周期函数（如 n%3）三点差分可能巧合相等，末项不符则非线性
 			last := g0 + d1*(n-1)
-			if actual, err := g(int64(begin) + (n-1)*int64(step)); err == nil && actual == last {
+			if actual, err := g(begin + (n-1)*step); err == nil && actual == last {
 				return IntV(n * (g0 + last) / 2), nil // 乘加闭式
 			}
 		}
 	}
 	// 位级置换：生成器序列有周期 P → 周期位统计预计算，O(P+bits) 乘加（P << n 时远快于循环）
-	if n := (int64(stop) - int64(begin) + int64(step) - 1) / int64(step); n > 0 {
-		if p, ok := detectPeriod(g, int64(begin), int64(step), n); ok && p < n {
+	if n := (stop - begin + step - 1) / step; n > 0 {
+		if p, ok := detectPeriod(g, begin, step, n); ok && p < n {
 			// 一个周期的位统计：counts[k] = 周期内第 k 位为 1 的次数
 			var counts [32]int64
 			for j := int64(0); j < p; j++ {
-				v, err := g(int64(begin) + j*int64(step))
+				v, err := g(begin + j*step)
 				if err != nil {
-					return nil, err
+					return NilV(), err
 				}
 				for k := 0; k < 32; k++ {
 					if v&(1<<uint(k)) != 0 {
@@ -1726,9 +1742,9 @@ func (in *interp) sumBuiltin(args []Value, pos Pos, ctx *execCtx) (Value, error)
 			}
 			// 余数部分逐项补
 			for j := int64(0); j < r; j++ {
-				v, err := g(int64(begin) + j*int64(step))
+				v, err := g(begin + j*step)
 				if err != nil {
-					return nil, err
+					return NilV(), err
 				}
 				sum += v
 			}
@@ -1740,7 +1756,7 @@ func (in *interp) sumBuiltin(args []Value, pos Pos, ctx *execCtx) (Value, error)
 	for i := int64(begin); i < int64(stop); i += int64(step) {
 		v, err := g(i)
 		if err != nil {
-			return nil, err
+			return NilV(), err
 		}
 		total += v
 	}
@@ -1780,49 +1796,48 @@ func detectPeriod(g func(int64) (int64, error), begin, step, n int64) (int64, bo
 func (in *interp) registerIOBuiltins() {
 	in.builtins["clock"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
 		if len(args) != 0 {
-			return nil, wantArity("clock", 0, len(args), pos, ctx)
+			return NilV(), wantArity("clock", 0, len(args), pos, ctx)
 		}
-		return IntV(int32(time.Now().UnixMicro())), nil // 微秒
+		return IntV(int64(int32(time.Now().UnixMicro()))), nil // 微秒
 	}
 	in.builtins["rand"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
 		if len(args) != 0 {
-			return nil, wantArity("rand", 0, len(args), pos, ctx)
+			return NilV(), wantArity("rand", 0, len(args), pos, ctx)
 		}
 		// LCG：确定性伪随机 [0, 2^31-1]
 		in.randState = in.randState*6364136223846793005 + 1442695040888963407
-		return IntV(int32(in.randState >> 33)), nil
+		return IntV(int64(int32(in.randState >> 33))), nil
 	}
 	in.builtins["sum"] = in.sumBuiltin
 	in.builtins["FileInputStream"] = in.fileInputStreamBuiltin
 	in.builtins["ifstream"] = in.fileInputStreamBuiltin
 	in.builtins["iofstream"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
 		if len(args) != 1 {
-			return nil, wantArity("iofstream", 1, len(args), pos, ctx)
+			return NilV(), wantArity("iofstream", 1, len(args), pos, ctx)
 		}
-		p, ok := args[0].(StrV)
-		if !ok {
-			return nil, &RunError{Msg: fmt.Sprintf("TypeError: iofstream requires a path string, got %s", args[0].TypeName()), Pos: pos, Ctx: ctx}
+		if !args[0].IsStr() {
+			return NilV(), &RunError{Msg: fmt.Sprintf("TypeError: iofstream requires a path string, got %s", args[0].TypeName()), Pos: pos, Ctx: ctx}
 		}
 		// 双向文件流：读+写
-		rf, err := os.OpenFile(string(p), os.O_RDWR|os.O_CREATE, 0o644)
+		rf, err := os.OpenFile(args[0].Str(), os.O_RDWR|os.O_CREATE, 0o644)
 		if err != nil {
-			return nil, &RunError{Msg: fmt.Sprintf("IOError: cannot open %q: %v", string(p), err), Pos: pos, Ctx: ctx}
+			return NilV(), &RunError{Msg: fmt.Sprintf("IOError: cannot open %q: %v", args[0].Str(), err), Pos: pos, Ctx: ctx}
 		}
-		return &InputStream{R: rf}, nil
+		return InV(&InputStream{R: rf}), nil
 	}
 	in.builtins["FileOutputStream"] = in.fileOutputStreamBuiltin
 	in.builtins["ofstream"] = in.fileOutputStreamBuiltin
 	in.builtins["ConsoleInputStream"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
 		if len(args) != 0 {
-			return nil, wantArity("ConsoleInputStream", 0, len(args), pos, ctx)
+			return NilV(), wantArity("ConsoleInputStream", 0, len(args), pos, ctx)
 		}
-		return &InputStream{R: os.Stdin}, nil
+		return InV(&InputStream{R: os.Stdin}), nil
 	}
 	in.builtins["ConsoleOutputStream"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
 		if len(args) != 0 {
-			return nil, wantArity("ConsoleOutputStream", 0, len(args), pos, ctx)
+			return NilV(), wantArity("ConsoleOutputStream", 0, len(args), pos, ctx)
 		}
-		return &OutputStream{W: os.Stdout}, nil
+		return OutV(&OutputStream{W: os.Stdout}), nil
 	}
 }
 
@@ -1884,13 +1899,13 @@ func (in *interp) runOnThread(t *Task, fn *Func, args []Value, pos Pos) error {
 
 // taskArg 接受 Task 或 pid，返回对应协程。
 func (in *interp) taskArg(v Value, pos Pos, ctx *execCtx) (*Task, error) {
-	switch a := v.(type) {
-	case *Task:
-		return a, nil
-	case IntV:
-		t, ok := in.lookupTask(int(a))
+	if v.IsTask() {
+		return v.Task(), nil
+	}
+	if v.IsInt() {
+		t, ok := in.lookupTask(int(v.Int()))
 		if !ok {
-			return nil, &RunError{Msg: fmt.Sprintf("RuntimeError: unknown task pid %d", int(a)), Pos: pos, Ctx: ctx}
+			return nil, &RunError{Msg: fmt.Sprintf("RuntimeError: unknown task pid %d", v.Int()), Pos: pos, Ctx: ctx}
 		}
 		return t, nil
 	}
@@ -1899,14 +1914,14 @@ func (in *interp) taskArg(v Value, pos Pos, ctx *execCtx) (*Task, error) {
 
 // lookupFunc resolves a function reference (FuncValue or a name string).
 func lookupFunc(v Value, in *interp) (*Func, error) {
-	switch t := v.(type) {
-	case *FuncValue:
-		return t.fn, nil
-	case StrV:
-		if fn, ok := in.fns[string(t)]; ok {
+	if v.IsFunc() {
+		return v.Func().fn, nil
+	}
+	if v.IsStr() {
+		if fn, ok := in.fns[v.Str()]; ok {
 			return fn, nil
 		}
-		return nil, fmt.Errorf("CompileError: undeclared function %q", string(t))
+		return nil, fmt.Errorf("CompileError: undeclared function %q", v.Str())
 	}
 	return nil, fmt.Errorf("TypeError: taskm::spawn requires a function reference, got %s", v.TypeName())
 }
@@ -1916,18 +1931,18 @@ func lookupFunc(v Value, in *interp) (*Func, error) {
 func (in *interp) memorizeBufferCall(mb *MemorizeBuffer, prefix *StructValue, rec *StructValue, pos Pos, ctx *execCtx) (Value, error) {
 	nv, ok := prefix.Fields["fn"]
 	if !ok {
-		return nil, &RunError{Msg: "TypeError: memorize prefix 缺少被包装函数 fn", Pos: pos, Ctx: ctx}
+		return NilV(), &RunError{Msg: "TypeError: memorize prefix 缺少被包装函数 fn", Pos: pos, Ctx: ctx}
 	}
-	f, ok := nv.(*FuncValue)
-	if !ok {
-		return nil, &RunError{Msg: "TypeError: prefix.fn 不是函数", Pos: pos, Ctx: ctx}
+	if !nv.IsFunc() {
+		return NilV(), &RunError{Msg: "TypeError: prefix.fn 不是函数", Pos: pos, Ctx: ctx}
 	}
-	inList, ok := rec.Fields["in"].(*List)
-	if !ok {
-		return nil, &RunError{Msg: "TypeError: rec.in 必须是 List", Pos: pos, Ctx: ctx}
+	f := nv.Func()
+	if !rec.Fields["in"].IsList() {
+		return NilV(), &RunError{Msg: "TypeError: rec.in 必须是 List", Pos: pos, Ctx: ctx}
 	}
 	// 记忆化键：in 参数列表
-	if cached, hit := mb.Table.Get(inList); hit {
+	inList := rec.Fields["in"].List()
+	if cached, hit := mb.Table.Get(ListV(inList)); hit {
 		rec.Fields["out"] = cached
 		return cached, nil
 	}
@@ -1938,10 +1953,10 @@ func (in *interp) memorizeBufferCall(mb *MemorizeBuffer, prefix *StructValue, re
 	}
 	res, err := in.callFunc(f.fn, argVals, pos)
 	if err != nil {
-		return nil, err
+		return NilV(), err
 	}
 	rec.Fields["out"] = res
-	mb.Table.Put(inList, res)
+	mb.Table.Put(ListV(inList), res)
 	return res, nil
 }
 
@@ -1963,10 +1978,7 @@ func pow2(v int32) (int, bool) {
 
 func binOp(op string, l, r Value, pos Pos, ctx *execCtx) (Value, error) {
 	if op == "+" {
-		if _, ok := l.(StrV); ok {
-			return StrV(l.String() + r.String()), nil
-		}
-		if _, ok := r.(StrV); ok {
+		if l.IsStr() || r.IsStr() {
 			return StrV(l.String() + r.String()), nil
 		}
 	}
@@ -1974,28 +1986,26 @@ func binOp(op string, l, r Value, pos Pos, ctx *execCtx) (Value, error) {
 	case "+", "-", "*", "/", "%":
 		return arith(op, l, r, pos, ctx)
 	case "<<", ">>":
-		li, lInt := l.(IntV)
-		sh, sInt := r.(IntV)
-		if !lInt || !sInt {
-			return nil, &RunError{Msg: "TypeError: 位移运算需要 int 操作数", Pos: pos, Ctx: ctx}
+		if !l.IsInt() || !r.IsInt() {
+			return NilV(), &RunError{Msg: "TypeError: 位移运算需要 int 操作数", Pos: pos, Ctx: ctx}
 		}
+		li, sh := l.Int(), r.Int()
 		if op == "<<" {
-			return IntV(int32(li) << uint(sh&31)), nil
+			return IntV(int64(int32(li) << uint(sh&31))), nil
 		}
-		return IntV(int32(li) >> uint(sh&31)), nil // 算术右移（符号扩展）
+		return IntV(int64(int32(li) >> uint(sh&31))), nil // 算术右移（符号扩展）
 	case "==", "!=", "<", "<=", ">", ">=":
 		return cmp(op, l, r, pos, ctx)
 	}
-	return nil, &RunError{Msg: "internal: unknown operator " + op, Pos: pos, Ctx: ctx}
+	return NilV(), &RunError{Msg: "internal: unknown operator " + op, Pos: pos, Ctx: ctx}
 }
 
 func arith(op string, l, r Value, pos Pos, ctx *execCtx) (Value, error) {
-	li, lInt := l.(IntV)
-	ri, rInt := r.(IntV)
+	li, lInt, ri, rInt := l.Int(), l.IsInt(), r.Int(), r.IsInt()
 	if lInt && rInt {
 		switch op {
 		case "+":
-			return wrapI32(int64(li) + int64(ri)), nil
+			return wrapI32(li + ri), nil
 		case "-":
 			return wrapI32(int64(li) - int64(ri)), nil
 		case "*":
@@ -2006,23 +2016,23 @@ func arith(op string, l, r Value, pos Pos, ctx *execCtx) (Value, error) {
 			return wrapI32(int64(li) * int64(ri)), nil
 		case "/":
 			if ri == 0 {
-				return nil, &RunError{Msg: "DivisionByZeroError: integer division by zero", Pos: pos, Ctx: ctx}
+				return NilV(), &RunError{Msg: "DivisionByZeroError: integer division by zero", Pos: pos, Ctx: ctx}
 			}
 			return wrapI32(int64(li) / int64(ri)), nil
 		case "%":
 			if ri == 0 {
-				return nil, &RunError{Msg: "DivisionByZeroError: modulo by zero", Pos: pos, Ctx: ctx}
+				return NilV(), &RunError{Msg: "DivisionByZeroError: modulo by zero", Pos: pos, Ctx: ctx}
 			}
 			return wrapI32(int64(li) % int64(ri)), nil
 		}
 	}
 	lf, err := toFloat(l)
 	if err != nil {
-		return nil, &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
+		return NilV(), &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
 	}
 	rf, err := toFloat(r)
 	if err != nil {
-		return nil, &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
+		return NilV(), &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
 	}
 	switch op {
 	case "+":
@@ -2033,24 +2043,24 @@ func arith(op string, l, r Value, pos Pos, ctx *execCtx) (Value, error) {
 		return FloatV(lf * rf), nil
 	case "/":
 		if rf == 0 {
-			return nil, &RunError{Msg: "DivisionByZeroError: float division by zero", Pos: pos, Ctx: ctx}
+			return NilV(), &RunError{Msg: "DivisionByZeroError: float division by zero", Pos: pos, Ctx: ctx}
 		}
 		return FloatV(lf / rf), nil
 	case "%":
-		return nil, &RunError{Msg: "TypeError: '%' requires int operands", Pos: pos, Ctx: ctx}
+		return NilV(), &RunError{Msg: "TypeError: '%' requires int operands", Pos: pos, Ctx: ctx}
 	}
-	return nil, &RunError{Msg: "internal: unknown arithmetic operator " + op, Pos: pos, Ctx: ctx}
+	return NilV(), &RunError{Msg: "internal: unknown arithmetic operator " + op, Pos: pos, Ctx: ctx}
 }
 
 // wrapI32 truncates to 32-bit two's complement, matching C int overflow.
-func wrapI32(x int64) IntV { return IntV(int32(x)) }
+func wrapI32(x int64) Value { return IntV(int64(int32(x))) }
 
 func toFloat(v Value) (float64, error) {
-	switch t := v.(type) {
-	case IntV:
-		return float64(t), nil
-	case FloatV:
-		return float64(t), nil
+	if v.IsInt() {
+		return float64(v.Int()), nil
+	}
+	if v.IsFloat() {
+		return v.Float(), nil
 	}
 	return 0, fmt.Errorf("TypeError: arithmetic requires numbers, got %s", v.TypeName())
 }
@@ -2059,34 +2069,34 @@ func cmp(op string, l, r Value, pos Pos, ctx *execCtx) (Value, error) {
 	if op == "==" || op == "!=" {
 		eq, err := equalValues(l, r)
 		if err != nil {
-			return nil, &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
+			return NilV(), &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
 		}
 		if op == "==" {
 			return BoolV(eq), nil
 		}
 		return BoolV(!eq), nil
 	}
-	switch a := l.(type) {
-	case IntV:
-		switch b := r.(type) {
-		case IntV:
-			return BoolV(ordCmp(float64(a), float64(b), op)), nil
-		case FloatV:
-			return BoolV(ordCmp(float64(a), float64(b), op)), nil
+	switch {
+	case l.IsInt():
+		if r.IsInt() {
+			return BoolV(ordCmp(float64(l.Int()), float64(r.Int()), op)), nil
 		}
-	case FloatV:
-		switch b := r.(type) {
-		case FloatV:
-			return BoolV(ordCmp(float64(a), float64(b), op)), nil
-		case IntV:
-			return BoolV(ordCmp(float64(a), float64(b), op)), nil
+		if r.IsFloat() {
+			return BoolV(ordCmp(float64(l.Int()), r.Float(), op)), nil
 		}
-	case StrV:
-		if b, ok := r.(StrV); ok {
-			return BoolV(ordCmpStr(string(a), string(b), op)), nil
+	case l.IsFloat():
+		if r.IsFloat() {
+			return BoolV(ordCmp(l.Float(), r.Float(), op)), nil
+		}
+		if r.IsInt() {
+			return BoolV(ordCmp(l.Float(), float64(r.Int()), op)), nil
+		}
+	case l.IsStr():
+		if r.IsStr() {
+			return BoolV(ordCmpStr(l.Str(), r.Str(), op)), nil
 		}
 	}
-	return nil, &RunError{Msg: fmt.Sprintf("TypeError: cannot order-compare %s and %s", l.TypeName(), r.TypeName()), Pos: pos, Ctx: ctx}
+	return NilV(), &RunError{Msg: fmt.Sprintf("TypeError: cannot order-compare %s and %s", l.TypeName(), r.TypeName()), Pos: pos, Ctx: ctx}
 }
 
 func ordCmp(a, b float64, op string) bool {
@@ -2119,43 +2129,43 @@ func ordCmpStr(a, b, op string) bool {
 
 // equalValues implements == / != with strict type discipline.
 func equalValues(l, r Value) (bool, error) {
-	switch a := l.(type) {
-	case IntV:
-		switch b := r.(type) {
-		case IntV:
-			return a == b, nil
-		case FloatV:
-			return float64(a) == float64(b), nil
+	switch {
+	case l.IsInt():
+		if r.IsInt() {
+			return l.Int() == r.Int(), nil
+		}
+		if r.IsFloat() {
+			return float64(l.Int()) == r.Float(), nil
 		}
 		return false, nil
-	case FloatV:
-		switch b := r.(type) {
-		case FloatV:
-			return float64(a) == float64(b), nil
-		case IntV:
-			return float64(a) == float64(b), nil
+	case l.IsFloat():
+		if r.IsFloat() {
+			return l.Float() == r.Float(), nil
+		}
+		if r.IsInt() {
+			return l.Float() == float64(r.Int()), nil
 		}
 		return false, nil
-	case StrV:
-		if b, ok := r.(StrV); ok {
-			return a == b, nil
+	case l.IsStr():
+		if r.IsStr() {
+			return l.Str() == r.Str(), nil
 		}
 		return false, nil
-	case BoolV:
-		if b, ok := r.(BoolV); ok {
-			return a == b, nil
+	case l.IsBool():
+		if r.IsBool() {
+			return l.Bool() == r.Bool(), nil
 		}
 		return false, nil
 	}
-	if l == nil || r == nil {
-		return l == nil && r == nil, nil
+	if l.IsNil() || r.IsNil() {
+		return l.IsNil() && r.IsNil(), nil
 	}
-	return l == r, nil
+	return l.tag == r.tag && l.i == r.i && l.ptr == r.ptr, nil
 }
 
 func truthy(v Value) (bool, error) {
-	if b, ok := v.(BoolV); ok {
-		return bool(b), nil
+	if v.IsBool() {
+		return v.Bool(), nil
 	}
 	return false, fmt.Errorf("TypeError: condition must be bool, got %s", v.TypeName())
 }

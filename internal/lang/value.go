@@ -4,50 +4,218 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"unsafe"
 )
 
-// Value is any QuarkLang runtime value.
-type Value interface {
-	TypeName() string
-	String() string
+// Value is any QuarkLang runtime value：24 字节标签联合体。
+// charley 设计: 标量（int/float/bool）内联在 i 字段零堆分配（消灭 convT64/mallocgc）；
+// 对象与字符串引用走 unsafe.Pointer（Go GC 可见，保活无野指针）。
+type Value struct {
+	tag uint8
+	i   int64          // 标量内联：int 值 / float 位模式 / bool 0|1
+	ptr unsafe.Pointer // 对象与字符串引用（*strRef / 堆对象）
 }
 
-// ---- scalars ----
+type ValueKind uint8
 
-type IntV int64
+const (
+	vNil ValueKind = iota
+	vInt
+	vFloat
+	vBool
+	vStr
+	vList
+	vTable
+	vIO
+	vIn
+	vOut
+	vMemorize
+	vMemory
+	vTaskm
+	vTask
+	vThread
+	vFunc
+	vCopyd
+	vChan
+	vStruct
+)
 
-func (v IntV) TypeName() string { return "int" }
-func (v IntV) String() string   { return strconv.FormatInt(int64(v), 10) }
+// ---- 标量构造器（保持旧名，调用点无需改） ----
 
-type FloatV float64
-
-func (v FloatV) TypeName() string { return "float" }
-func (v FloatV) String() string   { return strconv.FormatFloat(float64(v), 'f', -1, 64) }
-
-type BoolV bool
-
-func (v BoolV) TypeName() string { return "bool" }
-func (v BoolV) String() string {
-	if bool(v) {
-		return "true"
+func IntV(n int64) Value   { return Value{tag: byte(vInt), i: n} }
+func IntV32(n int32) Value { return IntV(int64(n)) }
+func FloatV(f float64) Value {
+	return Value{tag: byte(vFloat), i: int64(math.Float64bits(f))}
+}
+func BoolV(b bool) Value {
+	if b {
+		return Value{tag: byte(vBool), i: 1}
 	}
-	return "false"
+	return Value{tag: byte(vBool)}
 }
 
-type StrV string
+type strRef struct{ s string }
 
-func (v StrV) TypeName() string { return "String" }
-func (v StrV) String() string   { return string(v) }
+func StrV(str string) Value {
+	return Value{tag: byte(vStr), ptr: unsafe.Pointer(&strRef{s: str})}
+}
+func NilV() Value { return Value{} }
 
-// NilV is the unit value.
-type NilV struct{}
+func ListV(l *List) Value               { return Value{tag: byte(vList), ptr: unsafe.Pointer(l)} }
+func TableV(h *HashTable) Value         { return Value{tag: byte(vTable), ptr: unsafe.Pointer(h)} }
+func IOV(s *IOStream) Value             { return Value{tag: byte(vIO), ptr: unsafe.Pointer(s)} }
+func InV(s *InputStream) Value          { return Value{tag: byte(vIn), ptr: unsafe.Pointer(s)} }
+func OutV(s *OutputStream) Value        { return Value{tag: byte(vOut), ptr: unsafe.Pointer(s)} }
+func MemorizeV(m *MemorizeBuffer) Value { return Value{tag: byte(vMemorize), ptr: unsafe.Pointer(m)} }
+func MemoryV(m *Memory) Value           { return Value{tag: byte(vMemory), ptr: unsafe.Pointer(m)} }
+func TaskmV(t *TaskManager) Value       { return Value{tag: byte(vTaskm), ptr: unsafe.Pointer(t)} }
+func TaskV(t *Task) Value               { return Value{tag: byte(vTask), ptr: unsafe.Pointer(t)} }
+func ThreadV(t *ThreadValue) Value      { return Value{tag: byte(vThread), ptr: unsafe.Pointer(t)} }
+func FuncV(f *FuncValue) Value          { return Value{tag: byte(vFunc), ptr: unsafe.Pointer(f)} }
+func CopydV(c *CopydValue) Value        { return Value{tag: byte(vCopyd), ptr: unsafe.Pointer(c)} }
+func ChanV(c *Channel) Value            { return Value{tag: byte(vChan), ptr: unsafe.Pointer(c)} }
+func StructV(st *StructValue) Value     { return Value{tag: byte(vStruct), ptr: unsafe.Pointer(st)} }
 
-func (NilV) TypeName() string { return "nil" }
-func (NilV) String() string   { return "nil" }
+// ---- 类型判定 ----
+
+func (v Value) IsNil() bool      { return v.tag == byte(vNil) }
+func (v Value) IsInt() bool      { return v.tag == byte(vInt) }
+func (v Value) IsFloat() bool    { return v.tag == byte(vFloat) }
+func (v Value) IsBool() bool     { return v.tag == byte(vBool) }
+func (v Value) IsStr() bool      { return v.tag == byte(vStr) }
+func (v Value) IsList() bool     { return v.tag == byte(vList) }
+func (v Value) IsTable() bool    { return v.tag == byte(vTable) }
+func (v Value) IsIO() bool       { return v.tag == byte(vIO) }
+func (v Value) IsIn() bool       { return v.tag == byte(vIn) }
+func (v Value) IsOut() bool      { return v.tag == byte(vOut) }
+func (v Value) IsMemorize() bool { return v.tag == byte(vMemorize) }
+func (v Value) IsMemory() bool   { return v.tag == byte(vMemory) }
+func (v Value) IsTaskm() bool    { return v.tag == byte(vTaskm) }
+func (v Value) IsTask() bool     { return v.tag == byte(vTask) }
+func (v Value) IsThread() bool   { return v.tag == byte(vThread) }
+func (v Value) IsFunc() bool     { return v.tag == byte(vFunc) }
+func (v Value) IsCopyd() bool    { return v.tag == byte(vCopyd) }
+func (v Value) IsChan() bool     { return v.tag == byte(vChan) }
+func (v Value) IsStruct() bool   { return v.tag == byte(vStruct) }
+
+// ---- 取值（调用方保证类型匹配；不匹配返回零值/空，语义由测试兜底） ----
+
+func (v Value) Int() int64                { return v.i }
+func (v Value) Float() float64            { return math.Float64frombits(uint64(v.i)) }
+func (v Value) Bool() bool                { return v.i == 1 }
+func (v Value) Str() string               { return (*strRef)(v.ptr).s }
+func (v Value) List() *List               { return (*List)(v.ptr) }
+func (v Value) Table() *HashTable         { return (*HashTable)(v.ptr) }
+func (v Value) IO() *IOStream             { return (*IOStream)(v.ptr) }
+func (v Value) In() *InputStream          { return (*InputStream)(v.ptr) }
+func (v Value) Out() *OutputStream        { return (*OutputStream)(v.ptr) }
+func (v Value) Memorize() *MemorizeBuffer { return (*MemorizeBuffer)(v.ptr) }
+func (v Value) Memory() *Memory           { return (*Memory)(v.ptr) }
+func (v Value) Taskm() *TaskManager       { return (*TaskManager)(v.ptr) }
+func (v Value) Task() *Task               { return (*Task)(v.ptr) }
+func (v Value) Thread() *ThreadValue      { return (*ThreadValue)(v.ptr) }
+func (v Value) Func() *FuncValue          { return (*FuncValue)(v.ptr) }
+func (v Value) Copyd() *CopydValue        { return (*CopydValue)(v.ptr) }
+func (v Value) Chan() *Channel            { return (*Channel)(v.ptr) }
+func (v Value) Struct() *StructValue      { return (*StructValue)(v.ptr) }
+
+// TypeName 返回值的运行时类型名。
+func (v Value) TypeName() string {
+	switch ValueKind(v.tag) {
+	case vNil:
+		return "nil"
+	case vInt:
+		return "int"
+	case vFloat:
+		return "float"
+	case vBool:
+		return "bool"
+	case vStr:
+		return "String"
+	case vList:
+		return "List"
+	case vTable:
+		return "HashTable"
+	case vIO:
+		return "IOStream"
+	case vIn:
+		return "InputStream"
+	case vOut:
+		return "OutputStream"
+	case vMemorize:
+		return "memorize"
+	case vMemory:
+		return "memory"
+	case vTaskm:
+		return "taskm"
+	case vTask:
+		return "Task"
+	case vThread:
+		return "thread"
+	case vFunc:
+		return "fn"
+	case vCopyd:
+		return "Copyd"
+	case vChan:
+		return "Channel"
+	case vStruct:
+		return v.Struct().SType
+	}
+	return "<unknown>"
+}
+
+// String 返回值的显示字符串。
+func (v Value) String() string {
+	switch ValueKind(v.tag) {
+	case vNil:
+		return "nil"
+	case vInt:
+		return strconv.FormatInt(v.i, 10)
+	case vFloat:
+		return strconv.FormatFloat(v.Float(), 'f', -1, 64)
+	case vBool:
+		if v.i == 1 {
+			return "true"
+		}
+		return "false"
+	case vStr:
+		return (*strRef)(v.ptr).s
+	case vList:
+		return v.List().String()
+	case vTable:
+		return v.Table().String()
+	case vIO:
+		return "<IOStream>"
+	case vIn:
+		return "<InputStream>"
+	case vOut:
+		return "<OutputStream>"
+	case vMemorize:
+		return "<memorize buffer>"
+	case vMemory:
+		return "<memory>"
+	case vTaskm:
+		return "<taskm>"
+	case vTask:
+		return v.Task().String()
+	case vThread:
+		return v.Thread().String()
+	case vFunc:
+		return v.Func().String()
+	case vCopyd:
+		return v.Copyd().V.String()
+	case vChan:
+		return "<Channel>"
+	case vStruct:
+		return v.Struct().String()
+	}
+	return "<unknown>"
+}
 
 // ---- rolling List<T> (spec §4) ----
 
@@ -96,7 +264,7 @@ func (l *List) Size() int { return l.tail - l.head }
 // Peek returns the element at the head without moving the pointer ('*list').
 func (l *List) Peek() (Value, error) {
 	if l.head == l.tail {
-		return nil, fmt.Errorf("ListExhaustedError: list is exhausted (head()==tail()); '*' stops and errors")
+		return NilV(), fmt.Errorf("ListExhaustedError: list is exhausted (head()==tail()); '*' stops and errors")
 	}
 	return l.items[l.head], nil
 }
@@ -104,7 +272,7 @@ func (l *List) Peek() (Value, error) {
 // Next returns the head element and rolls the head pointer forward one step.
 func (l *List) Next() (Value, error) {
 	if l.head == l.tail {
-		return nil, fmt.Errorf("ListExhaustedError: list is exhausted (head()==tail()); next() stops and errors")
+		return NilV(), fmt.Errorf("ListExhaustedError: list is exhausted (head()==tail()); next() stops and errors")
 	}
 	v := l.items[l.head]
 	l.head++
@@ -134,7 +302,7 @@ func (l *List) AppendAll(o *List) {
 func (l *List) Get(i int) (Value, error) {
 	idx := l.head + i
 	if i < 0 || idx >= l.tail {
-		return nil, fmt.Errorf("IndexOutOfBoundsError: index %d out of range [0,%d)", i, l.Size())
+		return NilV(), fmt.Errorf("IndexOutOfBoundsError: index %d out of range [0,%d)", i, l.Size())
 	}
 	return l.items[idx], nil
 }
@@ -154,24 +322,24 @@ func (l *List) sortInPlace() error {
 	var sortErr error
 	sort.SliceStable(items, func(i, j int) bool {
 		a, b := items[i], items[j]
-		switch av := a.(type) {
-		case IntV:
-			switch bv := b.(type) {
-			case IntV:
-				return av < bv
-			case FloatV:
-				return float64(av) < float64(bv)
+		switch {
+		case a.IsInt():
+			if b.IsInt() {
+				return a.Int() < b.Int()
 			}
-		case FloatV:
-			switch bv := b.(type) {
-			case FloatV:
-				return float64(av) < float64(bv)
-			case IntV:
-				return float64(av) < float64(bv)
+			if b.IsFloat() {
+				return float64(a.Int()) < b.Float()
 			}
-		case StrV:
-			if bv, ok := b.(StrV); ok {
-				return av < bv
+		case a.IsFloat():
+			if b.IsFloat() {
+				return a.Float() < b.Float()
+			}
+			if b.IsInt() {
+				return a.Float() < float64(b.Int())
+			}
+		case a.IsStr():
+			if b.IsStr() {
+				return a.Str() < b.Str()
 			}
 		}
 		sortErr = fmt.Errorf("TypeError: __sort__ supports int/float/String elements only, got %s and %s", a.TypeName(), b.TypeName())
@@ -294,7 +462,7 @@ func (in *interp) newCtx(fn *Func, args []Value, pos Pos) *execCtx {
 	ctx.Fn = fn
 	ctx.Args = args
 	ctx.pos = pos
-	ctx.result = nil
+	ctx.result = NilV()
 	ctx.executed = false
 	ctx.Log.reset()
 	ctx.sc.outer = nil
@@ -459,20 +627,22 @@ func (c *Channel) String() string   { return "<Channel>" }
 // ---- deep copy (Copyd semantics; HashTable stores deep copies) ----
 
 func deepCopy(v Value) Value {
-	switch t := v.(type) {
-	case *List:
+	if v.IsList() {
+		t := v.List()
 		items := make([]Value, len(t.items))
 		for i, it := range t.items {
 			items[i] = deepCopy(it)
 		}
-		return &List{items: items, head: t.head, tail: t.tail}
-	case *HashTable:
+		cp := &List{items: items, head: t.head, tail: t.tail}
+		return ListV(cp)
+	}
+	if v.IsTable() {
+		t := v.Table()
 		h := NewHashTable()
 		for k, it := range t.m {
 			h.m[k] = deepCopy(it)
 		}
-		return h
-	default:
-		return v
+		return TableV(h)
 	}
+	return v
 }

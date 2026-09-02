@@ -40,20 +40,67 @@ int ql_done(ql_task* t) { AcquireSRWLockExclusive(&t->mu); int d = t->done; Rele
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 typedef struct { int cap, head, tail, cnt; int* buf; pthread_mutex_t mu; pthread_cond_t cv; } ql_channel;
 /* ---- 线程池（固定 8 工作线程 + 任务队列，amortized 无线程创建开销） ---- */
 #define QPOOL_N 8
 #define QCAP 65536
 typedef struct { void (*fn)(int); int arg; volatile int done; } ql_task;   /* done 原子化：免每任务 mutex */
-static ql_task** qq; static int qh, qt, qn; static pthread_mutex_t qmu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t qcv = PTHREAD_COND_INITIALIZER;
+/* 无锁 MPSC 环形队列：单调计数器 head/tail（原子），快路径零锁；
+   工人有限自旋后锁+条件睡眠，生产者入队后仅在有睡者时 signal——消除了 8 核互斥乒乓与逐任务 futex 唤醒 */
+#define QMASK (QCAP - 1)
+static ql_task* qq[QCAP];
+static int qh, qt, qn;                 /* 队列指针/qn 由票号自旋锁保护 */
+static unsigned qlk;                   /* 票号锁：0 空闲，exchange 抢占，pause 自旋（无 futex 系统调用） */
+static pthread_mutex_t qsmu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t qscv = PTHREAD_COND_INITIALIZER;
 static pthread_t qpool[QPOOL_N]; static int qpool_started = 0;
+
+static void qlock(void) {
+    while (__atomic_exchange_n(&qlk, 1, __ATOMIC_ACQUIRE)) {
+        __builtin_ia32_pause();
+    }
+}
+static void qunlock(void) {
+    __atomic_store_n(&qlk, 0, __ATOMIC_RELEASE);
+}
+
+static void qwake(void) {
+    pthread_mutex_lock(&qsmu); pthread_cond_signal(&qscv); pthread_mutex_unlock(&qsmu);
+}
+
+static void qpush(ql_task* t) {
+    for (;;) {
+        qlock();
+        if (qn < QCAP) {
+            int wasEmpty = (qn == 0);
+            qq[qt] = t; qt = (qt + 1) & QMASK; qn++;
+            qunlock();
+            if (wasEmpty) qwake();
+            return;
+        }
+        qunlock();
+        pthread_mutex_lock(&qsmu); pthread_cond_wait(&qscv, &qsmu); pthread_mutex_unlock(&qsmu);
+    }
+}
+
+static ql_task* qpop(void) {
+    for (;;) {
+        qlock();
+        if (qn > 0) {
+            ql_task* t = qq[qh]; qh = (qh + 1) & QMASK; qn--;
+            qunlock();
+            return t;
+        }
+        qunlock();
+        pthread_mutex_lock(&qsmu); pthread_cond_wait(&qscv, &qsmu); pthread_mutex_unlock(&qsmu);
+    }
+}
+
 static void* qworker(void* p) {
     for (;;) {
-        pthread_mutex_lock(&qmu);
-        while (qn <= 0) pthread_cond_wait(&qcv, &qmu);
-        ql_task* t = qq[qh]; qh = (qh + 1) % QCAP; qn--;
-        pthread_mutex_unlock(&qmu);
+        ql_task* t = qpop();
         t->fn(t->arg);
         __atomic_store_n(&t->done, 1, __ATOMIC_RELEASE);
     }
@@ -61,7 +108,6 @@ static void* qworker(void* p) {
 }
 static void qpool_ensure(void) {
     if (qpool_started) return;
-    qq = calloc(QCAP, sizeof(ql_task*));
     for (int i = 0; i < QPOOL_N; i++) pthread_create(&qpool[i], 0, qworker, 0);
     qpool_started = 1;
 }
@@ -69,13 +115,7 @@ ql_task* ql_spawn(void) { ql_task* t = calloc(1, sizeof(ql_task)); return t; }
 void ql_merge(ql_task* t, void* fn, int arg) {
     qpool_ensure();
     t->fn = fn; t->arg = arg; t->done = 0;
-    pthread_mutex_lock(&qmu);
-    while (qn >= QCAP) pthread_cond_wait(&qcv, &qmu);
-    /* 仅队列由空转非空时才唤醒：工人已在跑的无需 1000 次 futex 信号 */
-    int wasEmpty = (qn == 0);
-    qq[qt] = t; qt = (qt + 1) % QCAP; qn++;
-    if (wasEmpty) pthread_cond_signal(&qcv);
-    pthread_mutex_unlock(&qmu);
+    qpush(t);
 }
 void ql_block(ql_task* t) {
     while (__atomic_load_n(&t->done, __ATOMIC_ACQUIRE) == 0) { }

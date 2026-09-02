@@ -234,6 +234,7 @@ type Func struct {
 	Body       *Block
 	Pos        Pos
 	paramNames []string // 参数名缓存（槽位绑定用，共享零分配）
+	paramCopyd []bool   // Copyd 参数标志（惰性缓存，调用热路径免字符串扫描）
 }
 
 // ParamNames 返回参数名数组（惰性缓存，所有调用共享）。
@@ -247,6 +248,17 @@ func (f *Func) ParamNames() []string {
 	return f.paramNames
 }
 
+// CopydFlags 返回参数 Copyd 标志（惰性缓存，与 ParamNames 同一思路）。
+func (f *Func) CopydFlags() []bool {
+	if f.paramCopyd == nil {
+		f.paramCopyd = make([]bool, len(f.Params))
+		for i, p := range f.Params {
+			f.paramCopyd[i] = isCopydType(p.Type)
+		}
+	}
+	return f.paramCopyd
+}
+
 // execCtx 是函数执行的内部上下文（v2：语言面不再有 FuncBuffer）。
 // 函数执行记录日志（log），结果由 return 直接产生。
 type execCtx struct {
@@ -256,18 +268,28 @@ type execCtx struct {
 	result   Value
 	executed bool
 	pos      Pos
-	sc       scope // 函数执行作用域（复用，免每次调用堆分配）
+	sc       scope    // 函数执行作用域（复用，免每次调用堆分配）
+	link     *execCtx // 解释器空闲链（LIFO 复用，替代 sync.Pool）
 }
 
-// execCtxPool 复用函数调用上下文（高计算场景：减少每次调用的堆分配）。
-var execCtxPool = sync.Pool{
-	New: func() interface{} { return &execCtx{Log: NewList()} },
-}
-
-
-// NewExecCtx 接管调用参数切片所有权（evalArgs 每次新建，免复制）。
-func NewExecCtx(fn *Func, args []Value, pos Pos) *execCtx {
-	ctx := execCtxPool.Get().(*execCtx)
+// newCtx 接管调用参数切片所有权（evalArgs 每次新建，免复制）。
+// 上下文走解释器级无锁 LIFO 空闲栈（atomic CAS，单线程热路径仅 1-2 次原子操作）。
+func (in *interp) newCtx(fn *Func, args []Value, pos Pos) *execCtx {
+	var ctx *execCtx
+	for {
+		h := in.ctxHead.Load()
+		if h == nil {
+			break
+		}
+		if in.ctxHead.CompareAndSwap(h, h.link) {
+			ctx = h
+			break
+		}
+	}
+	if ctx == nil {
+		ctx = &execCtx{Log: NewList()}
+	}
+	ctx.link = nil
 	ctx.Fn = fn
 	ctx.Args = args
 	ctx.pos = pos
@@ -281,15 +303,21 @@ func NewExecCtx(fn *Func, args []Value, pos Pos) *execCtx {
 	return ctx
 }
 
-// putExecCtx 归还执行上下文（含参数切片）到池。
-func putExecCtx(ctx *execCtx) {
+// putCtx 归还执行上下文到空闲链。
+func (in *interp) putCtx(ctx *execCtx) {
 	ctx.Fn = nil
 	ctx.Args = nil
 	ctx.sc.outer = nil
 	ctx.sc.vars = nil
 	ctx.sc.slots = nil
 	ctx.sc.paramNames = nil
-	execCtxPool.Put(ctx)
+	for {
+		h := in.ctxHead.Load()
+		ctx.link = h
+		if in.ctxHead.CompareAndSwap(h, ctx) {
+			return
+		}
+	}
 }
 
 // ---- IO objects (spec §10) ----

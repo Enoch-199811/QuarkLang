@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -72,6 +73,10 @@ func (s *scope) declare(name string, v Value, pos Pos) error {
 
 func (s *scope) set(name string, v Value, pos Pos) error {
 	for sc := s; sc != nil; sc = sc.outer {
+		if pn := sc.paramNames; len(pn) > 0 && pn[0] == name {
+			sc.slots[0] = v
+			return nil
+		}
 		if i := sc.paramIndex(name); i >= 0 {
 			sc.slots[i] = v
 			return nil
@@ -89,6 +94,9 @@ func (s *scope) set(name string, v Value, pos Pos) error {
 
 func (s *scope) get(name string, pos Pos) (Value, error) {
 	for sc := s; sc != nil; sc = sc.outer {
+		if pn := sc.paramNames; len(pn) > 0 && pn[0] == name {
+			return sc.slots[0], nil
+		}
 		if i := sc.paramIndex(name); i >= 0 {
 			return sc.slots[i], nil
 		}
@@ -293,6 +301,7 @@ type ImplDef struct {
 }
 
 type interp struct {
+	ctxHead     atomic.Pointer[execCtx]
 	fns         map[string]*Func
 	sigs        map[string]*signDef
 	builtins    map[string]builtinFn
@@ -418,7 +427,7 @@ func runWithInterp(prog *Program, filename string, args []string, stdin io.Reade
 	default:
 		return nil, fmt.Errorf("CompileError: main must take 1-3 params in order (io IOStream, env HashTable<String,String>, args List<String>), got %d", len(mainFn.Params))
 	}
-	ctx := NewExecCtx(mainFn, mainArgs, mainFn.Pos)
+	ctx := in.newCtx(mainFn, mainArgs, mainFn.Pos)
 	return in, in.execute(ctx)
 }
 
@@ -489,9 +498,11 @@ func (in *interp) execute(ctx *execCtx) error {
 	fn := ctx.Fn
 	// 参数绑定到线性槽位：参数名缓存共享（零分配），值直接复用 ctx.Args
 	args := ctx.Args
-	for i, p := range fn.Params {
-		if isCopydType(p.Type) {
-			args[i] = deepCopy(args[i])
+	if flags := fn.CopydFlags(); flags != nil {
+		for i, f := range flags {
+			if f {
+				args[i] = deepCopy(args[i])
+			}
 		}
 	}
 	sc.setParams(fn.ParamNames(), args)
@@ -1038,13 +1049,15 @@ func (in *interp) callFunc(fn *Func, args []Value, pos Pos) (Value, error) {
 	if len(args) != len(fn.Params) {
 		return nil, &RunError{Msg: fmt.Sprintf("CompileError: %s expects %d args, got %d", fn.Name, len(fn.Params), len(args)), Pos: pos}
 	}
-	for i, p := range fn.Params {
-		if isCopydType(p.Type) {
-			args[i] = &CopydValue{V: deepCopy(args[i])}
+	if flags := fn.CopydFlags(); flags != nil {
+		for i, f := range flags {
+			if f {
+				args[i] = &CopydValue{V: deepCopy(args[i])}
+			}
 		}
 	}
-	ctx := NewExecCtx(fn, args, pos)
-	defer putExecCtx(ctx)
+	ctx := in.newCtx(fn, args, pos)
+	defer in.putCtx(ctx)
 	if err := in.execute(ctx); err != nil {
 		return nil, err
 	}
@@ -1852,7 +1865,7 @@ func (in *interp) runOnThread(t *Task, fn *Func, args []Value, pos Pos) error {
 	// 内存 block 归属该线程；结束后自动标记可回收
 	blockID := in.mem.Alloc(globalMemory.BlockSize, t.Pid)
 	t.BlockID = blockID
-	ctx := NewExecCtx(fn, args, pos)
+	ctx := in.newCtx(fn, args, pos)
 	ctx.Log.mem = in.mem
 	ctx.Log.blockID = blockID
 	ctx.Log.Append(StrV(fmt.Sprintf("taskm: merged %s(%d) pid=%d", fn.Name, len(args), t.Pid)))

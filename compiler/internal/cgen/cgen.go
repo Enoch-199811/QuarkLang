@@ -1031,6 +1031,7 @@ type fnMeta struct {
 	callees []string
 	hasLoop bool
 	hasMeth bool // 方法调用/函数引用（无法静态解析，保守不标 norecurse）
+	impure  bool // 调用/方法/列表/结构体/下标等可能有外界副作用（禁止 memory(none)）
 }
 
 func analyzeExpr(e *expr, m *fnMeta) {
@@ -1042,6 +1043,7 @@ func analyzeExpr(e *expr, m *fnMeta) {
 		if e.call != nil {
 			m.callees = append(m.callees, e.call.name)
 		}
+		m.impure = true
 	case kMethod:
 		m.hasMeth = true
 		for _, a := range e.method.args {
@@ -1051,12 +1053,15 @@ func analyzeExpr(e *expr, m *fnMeta) {
 		analyzeExpr(e.l, m)
 		analyzeExpr(e.r, m)
 	case kIndex:
+		m.impure = true
 		analyzeExpr(e.idx.i, m)
 	case kList:
+		m.impure = true
 		for _, it := range e.lst.items {
 			analyzeExpr(it, m)
 		}
 	case kStructLit:
+		m.impure = true
 		for _, v := range e.sl.values {
 			analyzeExpr(v, m)
 		}
@@ -1164,6 +1169,10 @@ func fnAttrs(name string, meta map[string]*fnMeta) string {
 	}
 	if !m.hasMeth && !reachesSelf(name, meta) {
 		attrs += " norecurse"
+	}
+	if len(m.callees) == 0 && !m.impure {
+		// 纯算术函数（无调用、无 IO、无堆访问）：仅操作局部与参数——LLVM 可跨调用消除/内联
+		attrs += " memory(none)"
 	}
 	return attrs
 }

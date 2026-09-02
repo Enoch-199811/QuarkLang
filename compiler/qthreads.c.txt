@@ -45,7 +45,7 @@ typedef struct { int cap, head, tail, cnt; int* buf; pthread_mutex_t mu; pthread
 /* ---- 线程池（固定 8 工作线程 + 任务队列，amortized 无线程创建开销） ---- */
 #define QPOOL_N 8
 #define QCAP 65536
-typedef struct { void (*fn)(int); int arg; volatile int done; pthread_mutex_t mu; } ql_task;
+typedef struct { void (*fn)(int); int arg; volatile int done; } ql_task;   /* done 原子化：免每任务 mutex */
 static ql_task** qq; static int qh, qt, qn; static pthread_mutex_t qmu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t qcv = PTHREAD_COND_INITIALIZER;
 static pthread_t qpool[QPOOL_N]; static int qpool_started = 0;
 static void* qworker(void* p) {
@@ -53,9 +53,9 @@ static void* qworker(void* p) {
         pthread_mutex_lock(&qmu);
         while (qn <= 0) pthread_cond_wait(&qcv, &qmu);
         ql_task* t = qq[qh]; qh = (qh + 1) % QCAP; qn--;
-        pthread_cond_signal(&qcv); pthread_mutex_unlock(&qmu);
+        pthread_mutex_unlock(&qmu);
         t->fn(t->arg);
-        pthread_mutex_lock(&t->mu); t->done = 1; pthread_mutex_unlock(&t->mu);
+        __atomic_store_n(&t->done, 1, __ATOMIC_RELEASE);
     }
     return 0;
 }
@@ -65,19 +65,22 @@ static void qpool_ensure(void) {
     for (int i = 0; i < QPOOL_N; i++) pthread_create(&qpool[i], 0, qworker, 0);
     qpool_started = 1;
 }
-ql_task* ql_spawn(void) { ql_task* t = calloc(1, sizeof(ql_task)); pthread_mutex_init(&t->mu, 0); return t; }
+ql_task* ql_spawn(void) { ql_task* t = calloc(1, sizeof(ql_task)); return t; }
 void ql_merge(ql_task* t, void* fn, int arg) {
     qpool_ensure();
     t->fn = fn; t->arg = arg; t->done = 0;
     pthread_mutex_lock(&qmu);
     while (qn >= QCAP) pthread_cond_wait(&qcv, &qmu);
+    /* 仅队列由空转非空时才唤醒：工人已在跑的无需 1000 次 futex 信号 */
+    int wasEmpty = (qn == 0);
     qq[qt] = t; qt = (qt + 1) % QCAP; qn++;
-    pthread_cond_signal(&qcv); pthread_mutex_unlock(&qmu);
+    if (wasEmpty) pthread_cond_signal(&qcv);
+    pthread_mutex_unlock(&qmu);
 }
 void ql_block(ql_task* t) {
-    while (1) { pthread_mutex_lock(&t->mu); int d = t->done; pthread_mutex_unlock(&t->mu); if (d) break; }
+    while (__atomic_load_n(&t->done, __ATOMIC_ACQUIRE) == 0) { }
 }
-int ql_done(ql_task* t) { pthread_mutex_lock(&t->mu); int d = t->done; pthread_mutex_unlock(&t->mu); return d; }
+int ql_done(ql_task* t) { return __atomic_load_n(&t->done, __ATOMIC_ACQUIRE); }
 
 /* 字符串拼接：malloc + 拷贝（String 变量 + 运算符） */
 char* ql_strcat(const char* a, const char* b) {

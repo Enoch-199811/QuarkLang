@@ -437,6 +437,7 @@ type execCtx struct {
 	executed bool
 	pos      Pos
 	sc       scope    // 函数执行作用域（复用，免每次调用堆分配）
+	depth    int      // 调用深度（栈溢出防护，按 ctx 传播，线程安全）
 	link     *execCtx // 空闲链（无锁 LIFO 栈）
 }
 

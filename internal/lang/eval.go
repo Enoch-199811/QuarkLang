@@ -539,7 +539,7 @@ func (in *interp) execStmt(st Stmt, sc *scope, ctx *execCtx) error {
 			sv := v.Struct()
 			if def, has := in.impls[sv.SType]; has {
 				if fn, ok := def.SelfMethods["__delete__"]; ok {
-					if _, err := in.callFunc(fn, []Value{StructV(sv)}, s.Pos); err != nil {
+					if _, err := in.callFunc(fn, []Value{StructV(sv)}, s.Pos, ctx.depth); err != nil {
 						return err
 					}
 				}
@@ -711,7 +711,7 @@ func (in *interp) evalExpr(e Expr, sc *scope, ctx *execCtx) (Value, error) {
 			if err != nil {
 				return NilV(), err
 			}
-			if !sv.IsInt() || sv.Int() < 0 || sv.Int() > 1<<26 {
+			if !sv.IsInt() || sv.Int() < 0 || sv.Int() > 1<<23 {
 				ctx.ensureLog().Append(StrV("badAlloc: invalid size"))
 				return NilV(), &RunError{Msg: "badAlloc: new " + x.Typ + " 申请大小非法", Pos: x.Pos, Ctx: ctx}
 			}
@@ -1027,16 +1027,16 @@ func (in *interp) evalCall(c *CallExpr, sc *scope, ctx *execCtx) (Value, error) 
 	}
 	// FnIdx 编译期已解析：直取 fnList，免 map 哈希
 	if c.FnIdx >= 0 && c.FnIdx < len(in.fnList) {
-		return in.callFunc(in.fnList[c.FnIdx], argVals, id.Pos)
+		return in.callFunc(in.fnList[c.FnIdx], argVals, id.Pos, ctx.depth)
 	}
 	if fn, ok := in.fns[id.Name]; ok {
-		return in.callFunc(fn, argVals, id.Pos)
+		return in.callFunc(fn, argVals, id.Pos, ctx.depth)
 	}
 	// 函数引用变量：f 是变量且值为 FuncValue → 调用
 	if v, err := sc.get(id.Name, id.Pos); err == nil {
 		if v.IsFunc() {
 			fv := v.Func()
-			return in.callFunc(fv.fn, argVals, id.Pos)
+			return in.callFunc(fv.fn, argVals, id.Pos, ctx.depth)
 		}
 	}
 	if b, ok := in.builtins[id.Name]; ok {
@@ -1046,7 +1046,7 @@ func (in *interp) evalCall(c *CallExpr, sc *scope, ctx *execCtx) (Value, error) 
 }
 
 // callFunc：v2 —— 函数调用返回 return 的结果（log 结束则返回 nil）。
-func (in *interp) callFunc(fn *Func, args []Value, pos Pos) (Value, error) {
+func (in *interp) callFunc(fn *Func, args []Value, pos Pos, parentDepth int) (Value, error) {
 	// 内置函数引用（如 sum 的生成器 rand）：仅当是伪函数（无 Body）时——用户同名方法不被劫持
 	if fn.Body == nil {
 		if b, ok := in.builtins[fn.Name]; ok {
@@ -1055,6 +1055,9 @@ func (in *interp) callFunc(fn *Func, args []Value, pos Pos) (Value, error) {
 	}
 	if len(args) != len(fn.Params) {
 		return NilV(), &RunError{Msg: fmt.Sprintf("CompileError: %s expects %d args, got %d", fn.Name, len(fn.Params), len(args)), Pos: pos}
+	}
+	if parentDepth >= 8192 {
+		return NilV(), &RunError{Msg: "StackOverflowError: recursion depth exceeded 8192", Pos: pos}
 	}
 	if flags := fn.CopydFlags(); flags != nil {
 		for i, f := range flags {
@@ -1065,6 +1068,7 @@ func (in *interp) callFunc(fn *Func, args []Value, pos Pos) (Value, error) {
 	}
 	ctx := in.newCtx(fn, args, pos)
 	defer in.putCtx(ctx)
+	ctx.depth = parentDepth + 1
 	if err := in.execute(ctx); err != nil {
 		return NilV(), err
 	}
@@ -1269,8 +1273,8 @@ func (in *interp) callMethod(obj Value, name string, args []Value, ctx *execCtx,
 		case "channel":
 			cap := 1024 // 默认容量（spec §14.2）
 			if len(args) == 1 {
-				if !args[0].IsInt() || args[0].Int() < 1 {
-					return NilV(), &RunError{Msg: "TypeError: taskm.channel(n) requires a positive int capacity", Pos: pos, Ctx: ctx}
+				if !args[0].IsInt() || args[0].Int() < 1 || args[0].Int() > 1<<20 {
+					return NilV(), &RunError{Msg: "TypeError: taskm.channel(n) requires 0 < n <= 1048576", Pos: pos, Ctx: ctx}
 				}
 				cap = int(args[0].Int())
 			} else if len(args) != 0 {
@@ -1352,7 +1356,7 @@ func (in *interp) callMethod(obj Value, name string, args []Value, ctx *execCtx,
 			if err := wantArity(name, 1, len(args), pos, ctx); err != nil {
 				return NilV(), err
 			}
-			if !args[0].IsInt() || args[0].Int() < 1 {
+			if !args[0].IsInt() || args[0].Int() < 1 || args[0].Int() > 1<<20 {
 				return NilV(), &RunError{Msg: "TypeError: setBlock(n) requires a positive int block size", Pos: pos, Ctx: ctx}
 			}
 			o.BlockSize = int(args[0].Int()) // 动态调整 block 脏标记粒度
@@ -1485,7 +1489,7 @@ func (in *interp) callMethod(obj Value, name string, args []Value, ctx *execCtx,
 		}
 		if fn, ok := def.SelfMethods[name]; ok {
 			callArgs := append([]Value{obj}, args...)
-			return in.callFunc(fn, callArgs, pos)
+			return in.callFunc(fn, callArgs, pos, ctx.depth)
 		}
 		if _, ok := def.Methods[name]; ok {
 			return NilV(), &RunError{Msg: fmt.Sprintf("TypeError: %s.%s is a static method; call it via %s::%s(...)", o.SType, name, o.SType, name), Pos: pos, Ctx: ctx}
@@ -1612,7 +1616,7 @@ func (in *interp) evalScopeCall(x *ScopeCall, sc *scope, ctx *execCtx) (Value, e
 	}
 	if def, ok := in.impls[x.Scope]; ok {
 		if fn, ok := def.Methods[x.Name]; ok {
-			return in.callFunc(fn, args, x.Pos)
+			return in.callFunc(fn, args, x.Pos, ctx.depth)
 		}
 		return NilV(), &RunError{Msg: fmt.Sprintf("TypeError: %s has no static method %q", x.Scope, x.Name), Pos: x.Pos, Ctx: ctx}
 	}
@@ -1692,7 +1696,7 @@ func (in *interp) sumBuiltin(args []Value, pos Pos, ctx *execCtx) (Value, error)
 		}
 	}
 	g := func(i int64) (int64, error) {
-		v, err := in.callFunc(gen.fn, []Value{IntV(i)}, pos)
+		v, err := in.callFunc(gen.fn, []Value{IntV(i)}, pos, ctx.depth)
 		if err != nil {
 			return 0, err
 		}
@@ -1951,7 +1955,7 @@ func (in *interp) memorizeBufferCall(mb *MemorizeBuffer, prefix *StructValue, re
 		v, _ := inList.Get(i)
 		argVals = append(argVals, v)
 	}
-	res, err := in.callFunc(f.fn, argVals, pos)
+	res, err := in.callFunc(f.fn, argVals, pos, ctx.depth)
 	if err != nil {
 		return NilV(), err
 	}

@@ -818,6 +818,12 @@ func (p *parser) parseType() (string, error) {
 			if p.curIs(TGt) {
 				depth--
 			}
+			if p.curIs(TShr) {
+				depth -= 2
+				name += ">>"
+				p.advance()
+				continue
+			}
 			name += p.cur().Text
 			p.advance()
 		}

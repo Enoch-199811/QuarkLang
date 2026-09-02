@@ -57,7 +57,7 @@ func expandMacros(src string, mode string) (string, error) {
 	if len(macros) == 0 {
 		return src, nil
 	}
-	exp, err := lang.ExpandMacros(rest, macros, "run") // qkc 产出的是可执行二进制：选运行态分支
+	exp, err := lang.ExpandMacros(rest, macros, mode)
 	if err != nil {
 		return src, nil
 	}

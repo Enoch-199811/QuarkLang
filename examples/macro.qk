@@ -1,6 +1,6 @@
 #macro add (a, b) {
     #when (run) {
-        a + b
+        #return a + b
     }
 }
 

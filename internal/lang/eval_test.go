@@ -546,7 +546,7 @@ func TestIORedirect(t *testing.T) {
 func TestMacroNamedParams(t *testing.T) {
 	out, err := runSrc(t, `#macro emit (expr) {
     #when (run) {
-        expr
+        #return expr
     }
 }
 
@@ -564,9 +564,9 @@ fn main(io IOStream) {
 // #when(compile) 块在运行态被丢弃
 func TestMacroWhenCompileDropped(t *testing.T) {
 	out, err := runSrc(t, `#macro only (x) {
-    #when (compile) { io.println("COMPILE-ONLY"); }
+    #when (compile) { #return io.println("COMPILE-ONLY"); }
     #when (run) {
-        x
+        #return x
     }
 }
 
@@ -656,7 +656,7 @@ pub struct {
 func TestMacroDelimitersAndArity(t *testing.T) {
 	out, err := runSrc(t, `#macro add [a, b] {
     #when (run) {
-        a + b
+        #return a + b
     }
 }
 
@@ -671,7 +671,7 @@ fn main(io IOStream) {
 		t.Fatalf("got %q", out)
 	}
 	_, err = runSrc(t, `#macro two (a, b) {
-    a
+    #return a
 }
 
 fn main(io IOStream) {

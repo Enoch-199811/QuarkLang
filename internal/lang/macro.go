@@ -163,7 +163,7 @@ func ExpandMacros(toks []Token, macros []*MacroDef, mode string) ([]Token, error
 					for p, pname := range m.Params {
 						subst[pname] = callArgs[p]
 					}
-					body, err := expandBody(m.Body, subst, mode)
+					body, _, err := expandBody(m.Body, subst, mode)
 					if err != nil {
 						return nil, fmt.Errorf("宏 %s 展开失败：%v", m.Name, err)
 					}
@@ -192,8 +192,10 @@ func macroCallExcluded(i int, toks []Token) bool {
 }
 
 // expandBody 展开宏主体：参数按名替换；#when (compile|run) { ... } 按态选块；
+// #return <token...> 是宏的返回值（展开结果 = 返回指令后的 token，参数替换后），立即终止整个展开；
 // #error("msg") 直接报错；#insert/#execute/#ast 已随 pattern 语法移除。
-func expandBody(body []Token, subst map[string][]Token, mode string) ([]Token, error) {
+// 返回 (输出, 是否被 #return 终止)。
+func expandBody(body []Token, subst map[string][]Token, mode string) ([]Token, bool, error) {
 	var out []Token
 	i := 0
 	for i < len(body) {
@@ -207,55 +209,72 @@ func expandBody(body []Token, subst map[string][]Token, mode string) ([]Token, e
 			i++
 			continue
 		}
-		if i+1 >= len(body) || body[i+1].Kind != TIdent {
-			return nil, fmt.Errorf("第 %d 行：# 后必须是预处理命令（when/error）", t.Line)
+		if i+1 >= len(body) || (body[i+1].Kind != TIdent && body[i+1].Kind != TReturn) {
+			return nil, false, fmt.Errorf("第 %d 行：# 后必须是预处理命令（when/return/error）", t.Line)
 		}
 		cmd := body[i+1].Text
 		i += 2
+		if cmd == "return" {
+			// #return <expr>：展开结果 = 返回指令后的全部 token（参数替换），终止整个宏
+			if i >= len(body) {
+				return out, true, nil
+			}
+			for _, rt := range body[i:] {
+				if sub, ok := subst[rt.Text]; ok && rt.Kind == TIdent {
+					out = append(out, sub...)
+				} else {
+					out = append(out, rt)
+				}
+			}
+			return out, true, nil
+		}
 		if i >= len(body) {
-			return nil, fmt.Errorf("第 %d 行：#%s 需要 ( ... )", t.Line, cmd)
+			return nil, false, fmt.Errorf("第 %d 行：#%s 需要 ( ... )", t.Line, cmd)
 		}
 		closeK, ok := closeOf(body[i].Kind)
 		if !ok {
-			return nil, fmt.Errorf("第 %d 行：#%s 需要 ( ... )", t.Line, cmd)
+			return nil, false, fmt.Errorf("第 %d 行：#%s 需要 ( ... )", t.Line, cmd)
 		}
 		args, ni, err := takeBalancedPair(body, i, closeK)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		i = ni
 		switch cmd {
 		case "when":
 			if len(args) < 1 || args[0].Kind != TIdent {
-				return nil, fmt.Errorf("第 %d 行：#when 需要 (compile|run)", t.Line)
+				return nil, false, fmt.Errorf("第 %d 行：#when 需要 (compile|run)", t.Line)
 			}
 			if i >= len(body) || body[i].Kind != TLBrace {
-				return nil, fmt.Errorf("第 %d 行：#when 需要 { ... } 块", t.Line)
+				return nil, false, fmt.Errorf("第 %d 行：#when 需要 { ... } 块", t.Line)
 			}
 			blk, ni, err := takeBalancedPair(body, i, TRBrace)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			i = ni
 			if args[0].Text == mode || (mode == "explain" && args[0].Text == "run") {
-				sub, err := expandBody(blk, subst, mode)
+				sub, stop, err := expandBody(blk, subst, mode)
 				if err != nil {
-					return nil, err
+					return nil, false, err
 				}
 				out = append(out, sub...)
+				if stop {
+					return out, true, nil
+				}
 			}
 		case "error":
 			if len(args) < 1 || args[0].Kind != TStr {
-				return nil, fmt.Errorf("第 %d 行：#error 需要 (\"消息\")", t.Line)
+				return nil, false, fmt.Errorf("第 %d 行：#error 需要 (\"消息\")", t.Line)
 			}
-			return nil, fmt.Errorf("第 %d 行：预处理错误 #error(%s)", t.Line, args[0].Text)
+			return nil, false, fmt.Errorf("第 %d 行：预处理错误 #error(%s)", t.Line, args[0].Text)
 		case "insert", "execute", "exec", "ast":
-			return nil, fmt.Errorf("第 %d 行：#%s 已移除 —— 新宏语法 #macro name (参数) { 主体 } 中参数按名替换，无需 #insert/#ast", t.Line, cmd)
+			return nil, false, fmt.Errorf("第 %d 行：#%s 已移除 —— 新宏语法 #macro name (参数) { 主体 } 中参数按名替换，无需 #insert/#ast", t.Line, cmd)
 		default:
-			return nil, fmt.Errorf("第 %d 行：未知预处理命令 #%s", t.Line, cmd)
+			return nil, false, fmt.Errorf("第 %d 行：未知预处理命令 #%s", t.Line, cmd)
 		}
 	}
-	return out, nil
+	return out, false, nil
 }
 
 // String 便于报错展示。

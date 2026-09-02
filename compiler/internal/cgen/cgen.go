@@ -15,7 +15,7 @@ func Transpile(src string) (string, error) {
 	if err := p.parseProgram(); err != nil {
 		return "", err
 	}
-	e := &emitter{}
+	e := &emitter{fnMeta: programMeta(p.funcs, p.stmts)}
 	return e.emitProgram(p.funcs, p.stmts, p.structs), nil
 }
 
@@ -37,9 +37,10 @@ type varInfo struct {
 }
 
 type emitter struct {
-	b            strings.Builder // 模块头（printf 声明 + 字符串常量）
-	body         strings.Builder // 函数体（基本块 + 指令）
-	cur          string          // 当前基本块名
+	fnMeta       map[string]*fnMeta // 函数属性分析（norecurse/mustprogress）
+	b            strings.Builder    // 模块头（printf 声明 + 字符串常量）
+	body         strings.Builder    // 函数体（基本块 + 指令）
+	cur          string             // 当前基本块名
 	blockCount   int
 	vars         map[string]varInfo
 	regCount     int
@@ -183,7 +184,7 @@ func (e *emitter) emitProgram(funcs []*funcDef, mainStmts []stmt, structs []stru
 	e.body.WriteString("entry:\n")
 	e.emitBlock(mainStmts)
 	e.emitInstr("ret i32 0")
-	bodies.WriteString("define i32 @main() {\n" + e.body.String() + "}\n")
+	bodies.WriteString("define i32 @main()" + fnAttrs("main", e.fnMeta) + " {\n" + e.body.String() + "}\n")
 	return e.b.String() + emitRunners(e.runners) + bodies.String()
 }
 
@@ -207,7 +208,7 @@ func (e *emitter) emitFunc(fd *funcDef) string {
 			typ += "i32"
 		}
 		typ += " }"
-		sig.WriteString(typ + " %self")
+		sig.WriteString(typ + " noundef %self")
 		e.vars[fd.selfParam] = varInfo{reg: "self", param: true, isStruct: true}
 		e.structTypes[fd.selfParam] = fd.selfTyp
 		off = 1
@@ -217,10 +218,10 @@ func (e *emitter) emitFunc(fd *funcDef) string {
 			sig.WriteString(", ")
 		}
 		reg := fmt.Sprintf("%%p%d", i+off)
-		sig.WriteString("i32 " + reg)
+		sig.WriteString("i32 noundef " + reg)
 		e.vars[p] = varInfo{reg: reg, param: true}
 	}
-	sig.WriteString(")\n")
+	sig.WriteString(")" + fnAttrs(fd.name, e.fnMeta) + "\n")
 	e.cur = "entry"
 	e.body.WriteString("entry:\n")
 	e.funcReturned = false
@@ -1021,6 +1022,150 @@ type structDef struct {
 type callExpr struct {
 	name string
 	args []*expr
+}
+
+// ---------- 函数属性分析（LLVM norecurse/mustprogress 安全判定） ----------
+
+// fnMeta 收集单个函数的调用关系与循环标志。
+type fnMeta struct {
+	callees []string
+	hasLoop bool
+	hasMeth bool // 方法调用/函数引用（无法静态解析，保守不标 norecurse）
+}
+
+func analyzeExpr(e *expr, m *fnMeta) {
+	if e == nil {
+		return
+	}
+	switch e.kind {
+	case kCall:
+		if e.call != nil {
+			m.callees = append(m.callees, e.call.name)
+		}
+	case kMethod:
+		m.hasMeth = true
+		for _, a := range e.method.args {
+			analyzeExpr(a, m)
+		}
+	case kBin:
+		analyzeExpr(e.l, m)
+		analyzeExpr(e.r, m)
+	case kIndex:
+		analyzeExpr(e.idx.i, m)
+	case kList:
+		for _, it := range e.lst.items {
+			analyzeExpr(it, m)
+		}
+	case kStructLit:
+		for _, v := range e.sl.values {
+			analyzeExpr(v, m)
+		}
+	}
+}
+
+func analyzeStmt(s stmt, m *fnMeta) {
+	switch st := s.(type) {
+	case *declStmt:
+		analyzeExpr(st.init, m)
+	case *assignStmt:
+		analyzeExpr(st.x, m)
+	case *printlnStmt:
+		for _, a := range st.args {
+			analyzeExpr(a, m)
+		}
+	case *ifStmt:
+		analyzeExpr(st.cond, m)
+		for _, x := range st.then {
+			analyzeStmt(x, m)
+		}
+		for _, x := range st.els {
+			analyzeStmt(x, m)
+		}
+	case *whileStmt:
+		m.hasLoop = true
+		analyzeExpr(st.cond, m)
+		for _, x := range st.body {
+			analyzeStmt(x, m)
+		}
+	case *returnStmt:
+		analyzeExpr(st.x, m)
+	case *exprStmt:
+		analyzeExpr(st.x, m)
+	case *indexAssignStmt:
+		analyzeExpr(st.idx, m)
+		analyzeExpr(st.x, m)
+	case *tryStmt:
+		for _, x := range st.then {
+			analyzeStmt(x, m)
+		}
+		for _, x := range st.catch {
+			analyzeStmt(x, m)
+		}
+	}
+}
+
+// programMeta 建立函数元信息表（含 main）。
+func programMeta(funcs []*funcDef, mainStmts []stmt) map[string]*fnMeta {
+	meta := make(map[string]*fnMeta, len(funcs)+1)
+	for _, fd := range funcs {
+		m := &fnMeta{}
+		for _, s := range fd.body {
+			analyzeStmt(s, m)
+		}
+		meta[fd.name] = m
+	}
+	mm := &fnMeta{}
+	for _, s := range mainStmts {
+		analyzeStmt(s, mm)
+	}
+	meta["main"] = mm
+	return meta
+}
+
+// reachesSelf 判断调用图是否形成含 name 的环（DFS，仅在已定义函数间走）。
+func reachesSelf(name string, meta map[string]*fnMeta) bool {
+	for _, c := range meta[name].callees {
+		if _, isFn := meta[c]; !isFn {
+			continue
+		}
+		seen := map[string]bool{}
+		var walk func(n string) bool
+		walk = func(n string) bool {
+			if n == name {
+				return true
+			}
+			if seen[n] {
+				return false
+			}
+			seen[n] = true
+			for _, cc := range meta[n].callees {
+				if _, ok := meta[cc]; ok && walk(cc) {
+					return true
+				}
+			}
+			return false
+		}
+		if walk(c) {
+			return true
+		}
+	}
+	return false
+}
+
+// fnAttrs 返回函数定义属性串（mustprogress/norecurse）。
+func fnAttrs(name string, meta map[string]*fnMeta) string {
+	m := meta[name]
+	if m == nil {
+		return ""
+	}
+	attrs := ""
+	if m.hasLoop {
+		attrs += " mustprogress"
+	}
+	if !m.hasMeth && !reachesSelf(name, meta) {
+		attrs += " norecurse"
+	}
+	return attrs
 }
 
 type returnStmt struct {

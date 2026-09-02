@@ -75,7 +75,8 @@ func main() {
 	// 本机极限可 QUARK_CFLAGS="-O3 -march=native"（产物仅当前 CPU 可运行）。
 	cflags := os.Getenv("QUARK_CFLAGS")
 	if cflags == "" {
-		cflags = "-O3"
+		// 默认 -O3 + thinLTO（跨翻译单元可见，fib35 实测 -4%）；LTO 不可用时降级纯 -O3
+		cflags = "-O3 -flto=thin"
 	}
 	binKey := hash + "|" + cflags
 	binPath := filepath.Join(cacheDir(), binKey+".bin")
@@ -140,10 +141,29 @@ func main() {
 	if runtime.GOOS != "windows" {
 		clangArgs = append(clangArgs, "-pthread")
 	}
-	clangArgs = append(clangArgs, strings.Fields(cflags)...)
-	cmd := exec.Command("clang", clangArgs...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		fmt.Fprintln(os.Stderr, "clang:", string(out))
+	// LTO 降级：默认含 -flto=thin 失败则去掉重试（仅当用户未显式指定 QUARK_CFLAGS）
+	attempts := [][]string{strings.Fields(cflags)}
+	if os.Getenv("QUARK_CFLAGS") == "" {
+		attempts = append(attempts, strings.Fields(strings.ReplaceAll(cflags, " -flto=thin", "")))
+	}
+	var lastOut string
+	ok := false
+	for _, cf := range attempts {
+		args := []string{tmp.Name(), runtimeSrc(), "-o", binPath, "-Wno-override-module"}
+		if runtime.GOOS != "windows" {
+			args = append(args, "-pthread")
+		}
+		args = append(args, cf...)
+		cmd := exec.Command("clang", args...)
+		if out, err := cmd.CombinedOutput(); err == nil {
+			ok = true
+			break
+		} else {
+			lastOut = string(out)
+		}
+	}
+	if !ok {
+		fmt.Fprintln(os.Stderr, "clang:", lastOut)
 		os.Exit(1)
 	}
 	out, err := exec.Command(binPath).CombinedOutput()

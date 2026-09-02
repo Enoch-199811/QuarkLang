@@ -484,7 +484,7 @@ func (in *interp) execute(ctx *execCtx) error {
 	}
 	ctx.executed = true
 
-	sc := &ctx.sc // 复用 ctx 内嵌作用域（免每次调用堆分配）
+	sc := &ctx.sc             // 复用 ctx 内嵌作用域（免每次调用堆分配）
 	sc.outer = in.globalScope // 全局作用域（DynamicStackAndHeap 等预声明一次，outer 链可见）
 	fn := ctx.Fn
 	// 参数绑定到线性槽位：参数名缓存共享（零分配），值直接复用 ctx.Args
@@ -742,7 +742,7 @@ func (in *interp) evalExpr(e Expr, sc *scope, ctx *execCtx) (Value, error) {
 		if x.Name == "false" {
 			return BoolV(false), nil
 		}
-		if x.Name == "memory" {
+		if x.Name == "memory" || x.Name == "GlobalMemory" {
 			return globalMemory, nil
 		}
 		if x.Name == "taskm" {
@@ -1547,37 +1547,6 @@ func (in *interp) evalScopeCall(x *ScopeCall, sc *scope, ctx *execCtx) (Value, e
 			return NewList(), nil
 		}
 		return nil, &RunError{Msg: fmt.Sprintf("TypeError: List has no static method %q", x.Name), Pos: x.Pos, Ctx: ctx}
-	case "GlobalMemory":
-		switch x.Name {
-		case "clear":
-			if len(args) != 0 {
-				return nil, wantArity("GlobalMemory::clear", 0, len(args), x.Pos, ctx)
-			}
-			in.mem.Clear()
-			return NilV{}, nil
-		case "mode":
-			if len(args) != 1 {
-				return nil, wantArity("GlobalMemory::mode", 1, len(args), x.Pos, ctx)
-			}
-			return NilV{}, nil // 实验性标志，v1 占位
-		case "compact":
-			if len(args) != 0 {
-				return nil, wantArity("GlobalMemory::compact", 0, len(args), x.Pos, ctx)
-			}
-			in.mem.Compact()
-			return NilV{}, nil
-		case "setBlock":
-			if len(args) != 1 {
-				return nil, wantArity("GlobalMemory::setBlock", 1, len(args), x.Pos, ctx)
-			}
-			n, ok := args[0].(IntV)
-			if !ok || n < 1 {
-				return nil, &RunError{Msg: "TypeError: GlobalMemory::setBlock(n) requires a positive int", Pos: x.Pos, Ctx: ctx}
-			}
-			globalMemory.BlockSize = int(n)
-			return NilV{}, nil
-		}
-		return nil, &RunError{Msg: fmt.Sprintf("TypeError: GlobalMemory has no static method %q", x.Name), Pos: x.Pos, Ctx: ctx}
 	case "taskm":
 		// taskm 是全局变量：正确语法是 taskm.spawn(...) / taskm.block(...) 等
 		return nil, &RunError{Msg: "TypeError: taskm is a global variable — use taskm.spawn(...) / taskm.block(pid) / taskm.done(pid) / taskm.merge(pid) / taskm.channel([n])", Pos: x.Pos, Ctx: ctx}

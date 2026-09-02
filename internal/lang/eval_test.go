@@ -352,7 +352,7 @@ fn main(io IOStream) {
     t.talk(ch);
     t.merge(worker, ch);
     x void = ch.recv();
-    GlobalMemory::compact();
+    GlobalMemory.compact();
 }`
 	prog, err := Compile(src)
 	if err != nil {
@@ -688,7 +688,7 @@ func TestDeleteReclaimsBlock(t *testing.T) {
     l List<int> = [1, 2, 3];
     io.println(l.size());
     delete l;
-    GlobalMemory::compact();
+    GlobalMemory.compact();
 }`)
 	if err != nil {
 		t.Fatal(err)

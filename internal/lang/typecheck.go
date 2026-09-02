@@ -1032,7 +1032,7 @@ func (c *checker) infer(e Expr, sc *cScope) (*Type, error) {
 		if x.Name == "true" || x.Name == "false" {
 			return tBoolV, nil
 		}
-		if x.Name == "memory" {
+		if x.Name == "memory" || x.Name == "GlobalMemory" {
 			return tMemoryV, nil
 		}
 		if x.Name == "taskm" {
@@ -1796,33 +1796,6 @@ func (c *checker) inferScope(x *ScopeCall, sc *cScope) (*Type, error) {
 	case "taskm":
 		// taskm 是全局变量：正确语法是 taskm.spawn(...) 等
 		return nil, c.errf(x.Pos, "TypeError: taskm is a global variable — use taskm.spawn(...) / taskm.block(pid) / taskm.done(pid) / taskm.merge(pid) / taskm.channel([n])")
-	case "GlobalMemory":
-		switch x.Name {
-		case "clear":
-			if err := c.checkArity("GlobalMemory::clear", 0, len(args), x.Pos); err != nil {
-				return nil, err
-			}
-			return tNilV, nil
-		case "mode":
-			if err := c.checkArity("GlobalMemory::mode", 1, len(args), x.Pos); err != nil {
-				return nil, err
-			}
-			return tNilV, nil
-		case "compact":
-			if err := c.checkArity("GlobalMemory::compact", 0, len(args), x.Pos); err != nil {
-				return nil, err
-			}
-			return tNilV, nil // compact() 根本不返回
-		case "setBlock":
-			if err := c.checkArity("GlobalMemory::setBlock", 1, len(args), x.Pos); err != nil {
-				return nil, err
-			}
-			if args[0].Kind != tInt {
-				return nil, c.errf(x.Pos, "TypeError: GlobalMemory::setBlock(n) requires an int, got %s", args[0])
-			}
-			return tNilV, nil
-		}
-		return nil, c.errf(x.Pos, "TypeError: GlobalMemory has no static method %q", x.Name)
 	}
 	if def, ok := c.impls[x.Scope]; ok {
 		// 泛型静态方法：类型参数按 interface{} 宽松替换

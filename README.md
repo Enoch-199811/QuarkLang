@@ -67,6 +67,14 @@ cd compiler && go build -o qkc .
 
 复现：`bench/Makefile`（跨语言）+ `docs/benchmarks.md`（方法/公正性声明）。
 
+## QuarkLang 官方项目
+
+| 项目 | 说明 | 仓库 |
+|---|---|---|
+| QuarkLangLibs-System | 官方认证的 `system` 库：进程执行 API（`exec` / `execv` / `popen`，包装运行时原语 qkexec/qkexecv/qkpopen，含 shell 注入说明与 8 MiB 输出上限） | https://github.com/Enoch-199811/QuarkLangLibs-System |
+
+使用：把 `system.qk` 放在与源码同目录，`import "system";` 后调用 `exec(...)` / `execv(...)` / `popen(...)`。
+
 ## 布局
 
 - `main.go` + `internal/lang/` —— 解释器（lexer/parser/typecheck/eval/runtime/宏）

@@ -94,6 +94,20 @@ func LoadImport(dir, path string) (string, error) {
 }
 
 // CompileWithImports 编译源码并解析 import（同目录默认搜索范围；v1 单层）。
+// stripProgramDecl 去掉导入源中的 program library;/program main; 声明行（库形态由主程序决定）。
+func stripProgramDecl(src string) string {
+	var sb strings.Builder
+	for _, ln := range strings.Split(src, "\n") {
+		t := strings.TrimSpace(ln)
+		if strings.HasPrefix(t, "program ") && strings.HasSuffix(t, ";") {
+			continue
+		}
+		sb.WriteString(ln)
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
 func CompileWithImports(src, filename string) (*Program, error) {
 	dir := "."
 	if filename != "" {
@@ -130,7 +144,8 @@ func CompileWithImports(src, filename string) (*Program, error) {
 		if err != nil {
 			return nil, err
 		}
-		merged.WriteString(imported)
+		// 库的 program 声明不参与合并：主程序的 program 才决定程序形态
+		merged.WriteString(stripProgramDecl(imported))
 		merged.WriteString("\n")
 	}
 	return Compile(merged.String())

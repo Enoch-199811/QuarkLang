@@ -658,7 +658,7 @@ func (c *checker) substType(s string, subst map[string]*Type, pos Pos) (*Type, e
 // isBuiltinFuncName 判断是否为内置函数（可作为函数引用传递）。
 func isBuiltinFuncName(s string) bool {
 	switch s {
-	case "rand", "sum", "FileInputStream", "FileOutputStream", "ifstream", "ofstream", "iofstream", "ConsoleInputStream", "ConsoleOutputStream":
+	case "rand", "sum", "FileInputStream", "FileOutputStream", "ifstream", "ofstream", "iofstream", "ConsoleInputStream", "ConsoleOutputStream", "qkexec", "qkexecv", "qkpopen":
 		return true
 	}
 	return false
@@ -1641,6 +1641,31 @@ func (c *checker) inferCall(x *CallExpr, sc *cScope) (*Type, error) {
 		return tFuncBufferV, nil
 	}
 	switch id.Name {
+	case "qkexec", "qkexecv":
+		want := 1
+		if id.Name == "qkexecv" {
+			want = 2
+		}
+		if err := c.checkArity(id.Name, want, len(args), id.Pos); err != nil {
+			return nil, err
+		}
+		if id.Name == "qkexec" && args[0].Kind != tString {
+			return nil, c.errf(id.Pos, "TypeError: qkexec requires a command String, got %s", args[0])
+		}
+		if id.Name == "qkexecv" {
+			if args[0].Kind != tString || args[1].Kind != tList {
+				return nil, c.errf(id.Pos, "TypeError: qkexecv(prog String, args List<String>)")
+			}
+		}
+		return tIntV, nil
+	case "qkpopen":
+		if err := c.checkArity("qkpopen", 1, len(args), id.Pos); err != nil {
+			return nil, err
+		}
+		if args[0].Kind != tString {
+			return nil, c.errf(id.Pos, "TypeError: qkpopen requires a path String, got %s", args[0])
+		}
+		return tInputStreamV, nil
 	case "FileInputStream", "ifstream", "iofstream":
 		if err := c.checkArity("FileInputStream", 1, len(args), id.Pos); err != nil {
 			return nil, err

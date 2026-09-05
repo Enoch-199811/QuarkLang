@@ -17,7 +17,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
-	prog, err := lang.Compile(string(src))
+	prog, err := lang.CompileWithImports(string(src), os.Args[1])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)

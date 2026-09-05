@@ -2,11 +2,13 @@ package lang
 
 import (
 	"bufio"
+	"bytes"
 	"container/heap"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1842,6 +1844,68 @@ func (in *interp) registerIOBuiltins() {
 			return NilV(), wantArity("ConsoleOutputStream", 0, len(args), pos, ctx)
 		}
 		return OutV(&OutputStream{W: os.Stdout}), nil
+	}
+	// [官方库 system 原语] 进程执行：qkexec(cmd) -> 退出码（shell -c）
+	in.builtins["qkexec"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+		if len(args) != 1 || !args[0].IsStr() {
+			return NilV(), &RunError{Msg: "TypeError: qkexec(cmd String) 需要一个字符串命令", Pos: pos, Ctx: ctx}
+		}
+		cmd := exec.Command("sh", "-c", args[0].Str())
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		err := cmd.Run()
+		if err != nil {
+			if ee, ok := err.(*exec.ExitError); ok {
+				return IntV(int64(ee.ExitCode())), nil
+			}
+			return NilV(), &RunError{Msg: fmt.Sprintf("IOError: 无法执行命令：%v", err), Pos: pos, Ctx: ctx}
+		}
+		return IntV(0), nil
+	}
+	// qkexecv(prog, args List<String>) -> 退出码（不经 shell，argv 直传）
+	in.builtins["qkexecv"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+		if len(args) != 2 || !args[0].IsStr() || !args[1].IsList() {
+			return NilV(), &RunError{Msg: "TypeError: qkexecv(prog String, args List<String>)，需要两个参数", Pos: pos, Ctx: ctx}
+		}
+		argList := args[1].List()
+		argv := make([]string, 0, argList.Size())
+		for argList.Head() != argList.Tail() {
+			it, err := argList.Next()
+			if err != nil {
+				return NilV(), &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
+			}
+			if !it.IsStr() {
+				return NilV(), &RunError{Msg: "TypeError: qkexecv 参数必须是 List<String>", Pos: pos, Ctx: ctx}
+			}
+			argv = append(argv, it.Str())
+		}
+		cmd := exec.Command(args[0].Str(), argv...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		err := cmd.Run()
+		if err != nil {
+			if ee, ok := err.(*exec.ExitError); ok {
+				return IntV(int64(ee.ExitCode())), nil
+			}
+			return NilV(), &RunError{Msg: fmt.Sprintf("IOError: 无法启动程序：%v", err), Pos: pos, Ctx: ctx}
+		}
+		return IntV(0), nil
+	}
+	// qkpopen(cmd) -> InputStream（捕获 stdout；8MB 上限）
+	in.builtins["qkpopen"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+		if len(args) != 1 || !args[0].IsStr() {
+			return NilV(), &RunError{Msg: "TypeError: qkpopen(cmd String) 需要一个字符串命令", Pos: pos, Ctx: ctx}
+		}
+		cmd := exec.Command("sh", "-c", args[0].Str())
+		cmd.Stderr = os.Stderr
+		out, err := cmd.Output()
+		if err != nil {
+			return NilV(), &RunError{Msg: fmt.Sprintf("IOError: 命令执行失败：%v", err), Pos: pos, Ctx: ctx}
+		}
+		if len(out) > 8<<20 {
+			return NilV(), &RunError{Msg: "IOError: qkpopen 输出超过 8MB 上限", Pos: pos, Ctx: ctx}
+		}
+		return InV(&InputStream{R: bytes.NewReader(out)}), nil
 	}
 }
 

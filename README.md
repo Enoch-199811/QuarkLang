@@ -71,9 +71,9 @@ cd compiler && go build -o qkc .
 
 | 项目 | 说明 | 仓库 |
 |---|---|---|
-| QuarkLangLibs-System | 官方认证的 `system` 库：进程执行 API（`exec` / `execv` / `popen`，包装运行时原语 qkexec/qkexecv/qkpopen，含 shell 注入说明与 8 MiB 输出上限） | https://github.com/Enoch-199811/QuarkLangLibs-System |
+| QuarkLangLibs-Actions | 官方认证的 `actions` 库：进程执行 API（`exec` / `execv` / `popen`，包装运行时原语 qkexec/qkexecv/qkpopen，含 shell 注入说明与 8 MiB 输出上限） | https://github.com/Enoch-199811/QuarkLangLibs-Actions |
 
-使用：把 `system.qk` 放在与源码同目录，`import "system";` 后调用 `exec(...)` / `execv(...)` / `popen(...)`。
+使用：把 `actions.qk` 放在与源码同目录，`import "actions";` 后调用 `exec(...)` / `execv(...)` / `popen(...)`。
 
 ## 布局
 

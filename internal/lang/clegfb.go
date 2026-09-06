@@ -12,6 +12,7 @@ import (
 	"image/color"
 	"image/png"
 	"os"
+	"strings"
 )
 
 // framebuffer 是 cleg 的渲染目标（预分配，重复使用）。
@@ -86,6 +87,34 @@ func (fb *framebuffer) drawGlyph(x, y int, glyph uint8, scale int, c uint32) {
 			fb.fillRect(x+ci*scale, y+r*scale, scale, scale, c)
 		}
 	}
+}
+
+// drawTextChain 字体回退链文本：font 链（"DejaVu Sans, Consolas, monospace"）逐个尝试 TTF；
+// 全部失败 → 内置 5x7 位图（回退链末端）。
+func (fb *framebuffer) drawTextChain(x, y int, text string, size int, c uint32, fontChain string) {
+	// 字体回退链：逐名探测系统字体路径（TTF 光栅）；全失败 → 内置 5x7 位图（链末端）
+	for _, name := range strings.Split(fontChain, ",") {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if p := fontPathOf(name); p != "" {
+			if ff, err := ftLoadFace(p, size); err == nil {
+				_ = ff
+				fb.ftDrawText(x, y, text, size, c, p)
+				return
+			}
+		}
+	}
+	fb.drawText(x, y, text, scaleFor(size), c)
+}
+
+// scaleFor 字号→5x7 位图缩放（font-size 语义近似：px/8）。
+func scaleFor(px int) int {
+	if px <= 8 {
+		return 1
+	}
+	return (px + 7) / 8
 }
 
 // drawText 字符串文本（逐字光栅，零分配）。

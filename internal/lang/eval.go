@@ -2586,6 +2586,17 @@ func (in *interp) registerIOBuiltins() {
 			rgb(byte(args[4].Int()), byte(args[5].Int()), byte(args[6].Int())))
 		return NilV(), nil
 	}
+	in.builtins["qkcleg_text_ex"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+		if len(args) != 8 || !args[6].IsStr() || !args[7].IsStr() {
+			return NilV(), &RunError{Msg: "TypeError: qkcleg_text_ex(x,y,size,r,g,b,text,fontChain)", Pos: pos, Ctx: ctx}
+		}
+		if in.fb == nil {
+			return NilV(), &RunError{Msg: "TypeError: 先 qkcleg_create", Pos: pos, Ctx: ctx}
+		}
+		in.fb.drawTextChain(int(args[0].Int()), int(args[1].Int()), args[6].Str(), int(args[2].Int()),
+			rgb(byte(args[3].Int()), byte(args[4].Int()), byte(args[5].Int())), args[7].Str())
+		return NilV(), nil
+	}
 	in.builtins["qkcleg_text"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
 		if len(args) != 7 || !args[6].IsStr() {
 			return NilV(), &RunError{Msg: "TypeError: qkcleg_text(x,y,size,r,g,b,String)", Pos: pos, Ctx: ctx}

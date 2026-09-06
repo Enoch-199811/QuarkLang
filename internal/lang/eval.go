@@ -317,6 +317,7 @@ type interp struct {
 	ctxHead     atomic.Pointer[execCtx]
 	fns         map[string]*Func
 	libObjs     map[string]*libObj // library 系统库绑定对象（懒加载句柄）
+	fb          *framebuffer       // cleg 渲染帧缓冲（预分配复用，零分配渲染路径）
 	sigs        map[string]*signDef
 	builtins    map[string]builtinFn
 	structs     map[string]*StructDef
@@ -683,6 +684,30 @@ func (in *interp) execStmt(st Stmt, sc *scope, ctx *execCtx) error {
 		switch t := s.Target.(type) {
 		case *Ident:
 			return sc.set(t.Name, v, t.Pos)
+		case *IndexExpr:
+			obj, err := in.evalExpr(t.X, sc, ctx)
+			if err != nil {
+				return err
+			}
+			if obj.IsTable() {
+				key, err := in.evalExpr(t.Idx, sc, ctx)
+				if err != nil {
+					return err
+				}
+				obj.Table().Put(key, v)
+				return nil
+			}
+			if obj.IsList() {
+				key, err := in.evalExpr(t.Idx, sc, ctx)
+				if err != nil {
+					return err
+				}
+				if !key.IsInt() {
+					return &RunError{Msg: "TypeError: 列表索引必须是 int", Pos: s.Pos, Ctx: ctx}
+				}
+				return obj.List().setIndex(int(key.Int()), v)
+			}
+			return &RunError{Msg: fmt.Sprintf("TypeError: 不支持对 %s 索引赋值", obj.TypeName()), Pos: s.Pos, Ctx: ctx}
 		case *MemberExpr:
 			obj, err := in.evalExpr(t.X, sc, ctx)
 			if err != nil {
@@ -2251,6 +2276,65 @@ func (in *interp) registerIOBuiltins() {
 			return NilV(), &RunError{Msg: fmt.Sprintf("JSONError: %v", err), Pos: pos, Ctx: ctx}
 		}
 		return qkjsonFromGo(raw)
+	}
+	// [cleg 渲染原语] CPU 光栅帧缓冲（性能极限：线性 u32、预分配、零分配热路径）
+	in.builtins["qkcleg_create"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+		if len(args) != 2 || !args[0].IsInt() || !args[1].IsInt() {
+			return NilV(), &RunError{Msg: "TypeError: qkcleg_create(w int, h int)", Pos: pos, Ctx: ctx}
+		}
+		w, h := int(args[0].Int()), int(args[1].Int())
+		if w <= 0 || h <= 0 || w > 16384 || h > 16384 {
+			return NilV(), &RunError{Msg: "TypeError: 帧缓冲尺寸非法", Pos: pos, Ctx: ctx}
+		}
+		if in.fb == nil {
+			in.fb = &framebuffer{}
+		}
+		in.fb.reset(w, h)
+		return NilV(), nil
+	}
+	in.builtins["qkcleg_clear"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+		if len(args) != 3 || !args[0].IsInt() || !args[1].IsInt() || !args[2].IsInt() {
+			return NilV(), &RunError{Msg: "TypeError: qkcleg_clear(r,g,b)", Pos: pos, Ctx: ctx}
+		}
+		if in.fb == nil {
+			return NilV(), &RunError{Msg: "TypeError: 先 qkcleg_create", Pos: pos, Ctx: ctx}
+		}
+		in.fb.fillPixels(rgb(byte(args[0].Int()), byte(args[1].Int()), byte(args[2].Int())))
+		return NilV(), nil
+	}
+	in.builtins["qkcleg_rect"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+		if len(args) != 7 {
+			return NilV(), &RunError{Msg: "TypeError: qkcleg_rect(x,y,w,h,r,g,b)", Pos: pos, Ctx: ctx}
+		}
+		if in.fb == nil {
+			return NilV(), &RunError{Msg: "TypeError: 先 qkcleg_create", Pos: pos, Ctx: ctx}
+		}
+		in.fb.fillRect(int(args[0].Int()), int(args[1].Int()), int(args[2].Int()), int(args[3].Int()),
+			rgb(byte(args[4].Int()), byte(args[5].Int()), byte(args[6].Int())))
+		return NilV(), nil
+	}
+	in.builtins["qkcleg_text"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+		if len(args) != 7 || !args[6].IsStr() {
+			return NilV(), &RunError{Msg: "TypeError: qkcleg_text(x,y,size,r,g,b,String)", Pos: pos, Ctx: ctx}
+		}
+		if in.fb == nil {
+			return NilV(), &RunError{Msg: "TypeError: 先 qkcleg_create", Pos: pos, Ctx: ctx}
+		}
+		in.fb.drawText(int(args[0].Int()), int(args[1].Int()), args[6].Str(), int(args[2].Int()),
+			rgb(byte(args[3].Int()), byte(args[4].Int()), byte(args[5].Int())))
+		return NilV(), nil
+	}
+	in.builtins["qkcleg_frame"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+		if len(args) != 1 || !args[0].IsStr() {
+			return NilV(), &RunError{Msg: "TypeError: qkcleg_frame(path String)", Pos: pos, Ctx: ctx}
+		}
+		if in.fb == nil {
+			return NilV(), &RunError{Msg: "TypeError: 先 qkcleg_create", Pos: pos, Ctx: ctx}
+		}
+		if err := in.fb.savePNG(args[0].Str()); err != nil {
+			return NilV(), &RunError{Msg: "IOError: " + err.Error(), Pos: pos, Ctx: ctx}
+		}
+		return NilV(), nil
 	}
 }
 

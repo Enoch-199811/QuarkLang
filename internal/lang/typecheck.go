@@ -34,6 +34,7 @@ const (
 	tNull
 	tTypeVar
 	tLib
+	tInterface
 )
 
 type Type struct {
@@ -74,7 +75,7 @@ var kindName = map[tKind]string{
 	tNil: "nil", tAny: "interface{}", tFuncBuffer: "FuncBuffer",
 	tIOStream: "IOStream", tInputStream: "InputStream", tOutputStream: "OutputStream",
 	tChannel: "Channel", tTask: "Task", tMemorize: "memorize", tMemory: "memory",
-	tFunc: "fn", tStruct: "struct", tTaskm: "taskm", tPtr: "ptr", tCopyd: "Copyd", tNull: "null", tTypeVar: "typevar", tLib: "library",
+	tFunc: "fn", tStruct: "struct", tTaskm: "taskm", tPtr: "ptr", tCopyd: "Copyd", tNull: "null", tTypeVar: "typevar", tLib: "library", tInterface: "interface",
 }
 
 func (t *Type) String() string {
@@ -147,6 +148,16 @@ func assignable(from, to *Type) bool {
 	// any（interface{}）：可赋给任意具体类型（运行时值兼容；json.loads 等动态解析场景）
 	if from.Kind == tAny || to.Kind == tAny {
 		return true
+	}
+	// 具名接口：struct/接口 → 接口 宽松放行（严格实现性校验在 checkCallArgs 等有 c 上下文处）
+	if to.Kind == tInterface {
+		if from.Kind == tInterface {
+			return from.FName == to.FName
+		}
+		if from.Kind == tStruct {
+			return true
+		}
+		return false
 	}
 	// Copyd：与内部类型互相可赋
 	if from.Kind == tCopyd {
@@ -369,6 +380,26 @@ func implKeyOf(typ, iface string) string {
 		return typ
 	}
 	return typ + "\x00" + iface
+}
+
+// staticMeth 聚合查找静态方法（无 self 首参）。
+func (c *checker) staticMeth(typ, name string) *Func {
+	for _, d := range c.implDefsFor(typ) {
+		if fn := d.Methods[name]; fn != nil {
+			return fn
+		}
+	}
+	return nil
+}
+
+// selfMeth 聚合查找实例方法（self 首参）。
+func (c *checker) selfMeth(typ, name string) *Func {
+	for _, d := range c.implDefsFor(typ) {
+		if fn := d.SelfMethods[name]; fn != nil {
+			return fn
+		}
+	}
+	return nil
 }
 
 // implDefsFor 聚合某类型所有 impl（无接口 + 各接口实现；多 impl 方法不重叠）。
@@ -729,7 +760,7 @@ func (c *checker) substType(s string, subst map[string]*Type, pos Pos) (*Type, e
 		return &Type{Kind: tStruct, FName: base, Args: args}, nil
 	}
 	if _, ok := c.interfaces[base]; ok {
-		return tAnyV, nil
+		return &Type{Kind: tInterface, FName: base}, nil // 具名接口：动态派发协议类型
 	}
 	// 函数类型 function<ret, p1, ...>：tFunc（签名串）
 	if base == "function" {
@@ -749,7 +780,7 @@ func (c *checker) substType(s string, subst map[string]*Type, pos Pos) (*Type, e
 // isBuiltinFuncName 判断是否为内置函数（可作为函数引用传递）。
 func isBuiltinFuncName(s string) bool {
 	switch s {
-	case "rand", "sum", "FileInputStream", "FileOutputStream", "ifstream", "ofstream", "iofstream", "ConsoleInputStream", "ConsoleOutputStream", "qkexec", "qkexecv", "qkpopen", "qkhttp_get", "qkhttp_post", "qkjson_dumps", "qkjson_loads":
+	case "rand", "sum", "FileInputStream", "FileOutputStream", "ifstream", "ofstream", "iofstream", "ConsoleInputStream", "ConsoleOutputStream", "qkexec", "qkexecv", "qkpopen", "qkhttp_get", "qkhttp_post", "qkjson_dumps", "qkjson_loads", "qkcleg_create", "qkcleg_clear", "qkcleg_rect", "qkcleg_text", "qkcleg_frame":
 		return true
 	}
 	return false
@@ -988,6 +1019,34 @@ func (c *checker) checkStmt(st Stmt, sc *cScope) error {
 				return c.errf(s.Pos, "TypeError: cannot assign %s to %s", t, v.typ)
 			}
 			v.init = true
+			return nil
+		case *IndexExpr:
+			recvT, err := c.infer(target.X, sc)
+			if err != nil {
+				return err
+			}
+			kidx, err := c.infer(target.Idx, sc)
+			if err != nil {
+				return err
+			}
+			switch recvT.Kind {
+			case tHashTable:
+				if recvT.Key != nil && !assignable(kidx, recvT.Key) {
+					return c.errf(target.Pos, "TypeError: 索引键需要 %s，给了 %s", recvT.Key, kidx)
+				}
+				if recvT.Elem != nil && !assignable(t, recvT.Elem) {
+					return c.errf(target.Pos, "TypeError: 值需要 %s，给了 %s", recvT.Elem, t)
+				}
+			case tList:
+				if kidx.Kind != tInt {
+					return c.errf(target.Pos, "TypeError: 列表索引必须是 int")
+				}
+				if recvT.Elem != nil && !assignable(t, recvT.Elem) {
+					return c.errf(target.Pos, "TypeError: 值需要 %s，给了 %s", recvT.Elem, t)
+				}
+			default:
+				return c.errf(target.Pos, "TypeError: 不支持对 %s 索引赋值", recvT)
+			}
 			return nil
 		case *MemberExpr:
 			objT, err := c.infer(target.X, sc)
@@ -1365,6 +1424,37 @@ func (c *checker) checkArity(name string, want, got int, pos Pos) error {
 // methodType 检查方法调用（接收者类型 + 参数个数 + 参数类型）。
 func (c *checker) methodType(recv *Type, name string, args []*Type, pos Pos) (*Type, error) {
 	switch recv.Kind {
+	case tInterface:
+		iface, ok := c.interfaces[recv.FName]
+		if !ok {
+			return nil, c.errf(pos, "TypeError: 未知接口 %q", recv.FName)
+		}
+		methods := append([]MethodSig{}, iface.Methods...)
+		for _, ex := range iface.Expands {
+			if ei, ok := c.interfaces[ex]; ok {
+				methods = append(methods, ei.Methods...)
+			}
+		}
+		for _, sig := range methods {
+			if sig.Name == name {
+				want := len(sig.Params)
+				if want > 0 && sig.Params[0].Name == "self" {
+					want--
+				}
+				if len(args) != want {
+					return nil, c.errf(pos, "TypeError: %s.%s 需要 %d 个参数，给了 %d", recv.FName, name, want, len(args))
+				}
+				ret := sig.Ret
+				if ret == "" || ret == "void" {
+					return tNilV, nil
+				}
+				if ret == "Self" {
+					return tAnyV, nil // Self 返回：运行时具体值
+				}
+				return c.resolveType(ret, pos)
+			}
+		}
+		return nil, c.errf(pos, "TypeError: 接口 %s 没有方法 %q", recv.FName, name)
 	case tLib:
 		if c.libs == nil {
 			return nil, c.errf(pos, "TypeError: 未知系统库 %q", recv.FName)
@@ -1738,8 +1828,8 @@ func (c *checker) methodType(recv *Type, name string, args []*Type, pos Pos) (*T
 			return tChannelV, nil
 		}
 	case tStruct:
-		def, ok := c.impls[recv.FName]
-		if !ok {
+		defs := c.implDefsFor(recv.FName)
+		if len(defs) == 0 {
 			return nil, c.errf(pos, "TypeError: type %s has no impl", recv.FName)
 		}
 		if sd, ok := c.structs[recv.FName]; ok {
@@ -1747,7 +1837,7 @@ func (c *checker) methodType(recv *Type, name string, args []*Type, pos Pos) (*T
 			c.curSubst = c.instanceSubst(sd, recv)
 			defer func() { c.curSubst = prev }()
 		}
-		if fn, ok := def.SelfMethods[name]; ok {
+		if fn := c.selfMeth(recv.FName, name); fn != nil {
 			if len(fn.Params)-1 != len(args) {
 				return nil, c.errf(pos, "CompileError: %s() expects %d args, got %d", name, len(fn.Params)-1, len(args))
 			}
@@ -1765,7 +1855,7 @@ func (c *checker) methodType(recv *Type, name string, args []*Type, pos Pos) (*T
 			}
 			return tFuncBufferV, nil
 		}
-		if _, ok := def.Methods[name]; ok {
+		if c.staticMeth(recv.FName, name) != nil {
 			return nil, c.errf(pos, "TypeError: %s is a static method; call it via %s::%s(...)", name, recv.FName, name)
 		}
 	case tPtr:
@@ -1888,6 +1978,35 @@ func (c *checker) inferCall(x *CallExpr, sc *cScope) (*Type, error) {
 			return nil, c.errf(id.Pos, "TypeError: qkhttp_get requires url String, got %s", args[0])
 		}
 		return tStringV, nil
+	case "qkcleg_create":
+		if err := c.checkArity(id.Name, 2, len(args), id.Pos); err != nil {
+			return nil, err
+		}
+		if args[0].Kind != tInt || args[1].Kind != tInt {
+			return nil, c.errf(id.Pos, "TypeError: qkcleg_create(w int, h int)")
+		}
+		return tNilV, nil
+	case "qkcleg_clear":
+		if err := c.checkArity(id.Name, 3, len(args), id.Pos); err != nil {
+			return nil, err
+		}
+		return tNilV, nil
+	case "qkcleg_frame":
+		if err := c.checkArity(id.Name, 1, len(args), id.Pos); err != nil {
+			return nil, err
+		}
+		if args[0].Kind != tString {
+			return nil, c.errf(id.Pos, "TypeError: qkcleg_frame(path String)")
+		}
+		return tNilV, nil
+	case "qkcleg_rect", "qkcleg_text":
+		if err := c.checkArity(id.Name, 7, len(args), id.Pos); err != nil {
+			return nil, err
+		}
+		if id.Name == "qkcleg_text" && args[6].Kind != tString {
+			return nil, c.errf(id.Pos, "TypeError: qkcleg_text(...String)")
+		}
+		return tNilV, nil
 	case "qkjson_dumps":
 		if err := c.checkArity("qkjson_dumps", 1, len(args), id.Pos); err != nil {
 			return nil, err
@@ -2009,8 +2128,39 @@ func (c *checker) checkCallArgs(fn *Func, args []Expr, sc *cScope, pos Pos) erro
 		if err != nil {
 			return err
 		}
+		if pt.Kind == tInterface {
+			// 接口参数严格实现性校验：实参 struct 须实现接口全部方法（动态派发保障）
+			if argTys[i].Kind == tStruct {
+				if err := c.checkImplements(argTys[i].FName, pt.FName); err != nil {
+					return c.errf(pos, "TypeError: argument %d of %s: %v", i+1, fn.Name, err)
+				}
+			} else if !assignable(argTys[i], pt) {
+				return c.errf(pos, "TypeError: argument %d of %s: cannot assign %s to %s", i+1, fn.Name, argTys[i], pt)
+			}
+			continue
+		}
 		if !assignable(argTys[i], pt) {
 			return c.errf(pos, "TypeError: argument %d of %s: cannot assign %s to %s", i+1, fn.Name, argTys[i], pt)
+		}
+	}
+	return nil
+}
+
+// checkImplements 校验 typ 是否实现接口 iface（方法名集合覆盖，多 impl 聚合）。
+func (c *checker) checkImplements(typ, iface string) error {
+	def, ok := c.interfaces[iface]
+	if !ok {
+		return fmt.Errorf("未知接口 %s", iface)
+	}
+	methods := append([]MethodSig{}, def.Methods...)
+	for _, ex := range def.Expands {
+		if ei, ok := c.interfaces[ex]; ok {
+			methods = append(methods, ei.Methods...)
+		}
+	}
+	for _, sig := range methods {
+		if c.selfMeth(typ, sig.Name) == nil {
+			return fmt.Errorf("类型 %s 未实现接口方法 %q", typ, sig.Name)
 		}
 	}
 	return nil
@@ -2067,35 +2217,38 @@ func (c *checker) inferScope(x *ScopeCall, sc *cScope) (*Type, error) {
 		// taskm 是全局变量：正确语法是 taskm.spawn(...) 等
 		return nil, c.errf(x.Pos, "TypeError: taskm is a global variable — use taskm.spawn(...) / taskm.block(pid) / taskm.done(pid) / taskm.merge(pid) / taskm.channel([n])")
 	}
-	if def, ok := c.impls[x.Scope]; ok {
-		// 泛型静态方法：类型参数按 interface{} 宽松替换
+	// 泛型静态方法：类型参数按 interface{} 宽松替换（聚合多个 impl，方法不重叠）
+	if defs := c.implDefsFor(x.Scope); len(defs) > 0 {
 		prev := c.curSubst
 		subst := map[string]*Type{}
-		for _, tp := range def.TypeParams {
-			subst[tp] = tAnyV
+		for _, def := range defs {
+			for _, tp := range def.TypeParams {
+				subst[tp] = tAnyV
+			}
 		}
 		c.curSubst = subst
 		defer func() { c.curSubst = prev }()
-		fn, ok := def.Methods[x.Name]
-		if !ok {
-			return nil, c.errf(x.Pos, "TypeError: %s has no static method %q", x.Scope, x.Name)
-		}
-		if len(fn.Params) != len(args) {
-			return nil, c.errf(x.Pos, "CompileError: %s::%s expects %d args, got %d", x.Scope, x.Name, len(fn.Params), len(args))
-		}
-		for i, p := range fn.Params {
-			pt, err := c.paramType(p, x.Pos)
-			if err != nil {
-				return nil, err
+		for _, def := range defs {
+			if fn, ok := def.Methods[x.Name]; ok {
+				if len(fn.Params) != len(args) {
+					return nil, c.errf(x.Pos, "CompileError: %s::%s expects %d args, got %d", x.Scope, x.Name, len(fn.Params), len(args))
+				}
+				for i, p := range fn.Params {
+					pt, err := c.paramType(p, x.Pos)
+					if err != nil {
+						return nil, err
+					}
+					if !assignable(args[i], pt) {
+						return nil, c.errf(x.Pos, "TypeError: argument %d of %s::%s: cannot assign %s to %s", i+1, x.Scope, x.Name, args[i], pt)
+					}
+				}
+				if fn.Ret != "" {
+					return c.substType(fn.Ret, c.curSubst, x.Pos)
+				}
+				return tFuncBufferV, nil
 			}
-			if !assignable(args[i], pt) {
-				return nil, c.errf(x.Pos, "TypeError: argument %d of %s::%s: cannot assign %s to %s", i+1, x.Scope, x.Name, args[i], pt)
-			}
 		}
-		if fn.Ret != "" {
-			return c.substType(fn.Ret, c.curSubst, x.Pos)
-		}
-		return tFuncBufferV, nil
+		return nil, c.errf(x.Pos, "TypeError: %s has no static method %q", x.Scope, x.Name)
 	}
 	return nil, c.errf(x.Pos, "CompileError: unknown scope %q", x.Scope)
 }

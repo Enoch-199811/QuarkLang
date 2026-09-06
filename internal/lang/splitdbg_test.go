@@ -1,5 +1,11 @@
 package lang
-import ("fmt"; "strings"; "testing")
+
+import (
+	"fmt"
+	"strings"
+	"testing"
+)
+
 func TestSplitDbg2(t *testing.T) {
 	segs := []string{}
 	for k := 1; k <= 11; k++ {

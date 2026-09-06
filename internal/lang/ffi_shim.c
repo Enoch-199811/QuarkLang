@@ -1,3 +1,6 @@
+#ifdef _WIN32
+/* Windows FFI：自研 wrapper 见 ffi_win_gen.c（免 libffi） */
+#else
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
@@ -80,3 +83,4 @@ QK_EXPORT int qk_ffi(void* fn, const int* types, const double* nums, void** ptrs
     }
     return 0;
 }
+#endif

@@ -1105,7 +1105,7 @@ func (in *interp) evalCall(c *CallExpr, sc *scope, ctx *execCtx) (Value, error) 
 		}
 		fn := in.bestMatchV(in.allDefs(id.Name), argVals)
 		if fn == nil {
-			return NilV(), &RunError{Msg: fmt.Sprintf("CompileError: 未找到匹配重载 %q", id.Name), Pos: id.Pos, Ctx: ctx}
+			return NilV(), &RunError{Msg: overloadErr(in.allDefs(id.Name), id.Name, len(argVals)), Pos: id.Pos, Ctx: ctx}
 		}
 		if len(argVals) != len(fn.Params) {
 			return NilV(), &RunError{Msg: fmt.Sprintf("CompileError: %s expects %d args, got %d", fn.Name, len(fn.Params), len(argVals)), Pos: id.Pos, Ctx: ctx}
@@ -1165,7 +1165,7 @@ func (in *interp) evalCall(c *CallExpr, sc *scope, ctx *execCtx) (Value, error) 
 	if defs := in.allDefs(id.Name); len(defs) > 0 {
 		fn := in.bestMatchV(defs, argVals)
 		if fn == nil {
-			return NilV(), &RunError{Msg: fmt.Sprintf("CompileError: 未找到匹配重载 %q", id.Name), Pos: id.Pos, Ctx: ctx}
+			return NilV(), &RunError{Msg: overloadErr(in.allDefs(id.Name), id.Name, len(argVals)), Pos: id.Pos, Ctx: ctx}
 		}
 		return in.callFunc(fn, argVals, id.Pos, ctx.depth)
 	}
@@ -1996,6 +1996,16 @@ func (in *interp) bestMatchV(defs []*Func, args []Value) *Func {
 		}
 	}
 	return best
+}
+
+// overloadErr 无匹配重载时生成兼容报错（参数数不匹配沿用 expects 文案）。
+func overloadErr(defs []*Func, name string, n int) string {
+	for _, d := range defs {
+		if len(d.Params) != n {
+			return fmt.Sprintf("CompileError: %s expects %d args, got %d", name, len(d.Params), n)
+		}
+	}
+	return fmt.Sprintf("CompileError: 未找到匹配重载 %q（参数类型不匹配）", name)
 }
 
 // selfMethodOf 聚合多 impl 查找实例方法（self 首参）。

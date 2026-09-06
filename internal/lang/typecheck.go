@@ -418,6 +418,16 @@ func (c *checker) implDefsFor(typ string) []*ImplDef {
 	return out
 }
 
+// overloadErrT 类型侧无匹配重载报错（与运行期文案一致）。
+func overloadErrT(defs []*Func, name string, n int) string {
+	for _, d := range defs {
+		if len(d.Params) != n {
+			return fmt.Sprintf("CompileError: %s expects %d args, got %d", name, len(d.Params), n)
+		}
+	}
+	return fmt.Sprintf("CompileError: 未找到匹配重载 %q（参数类型不匹配）", name)
+}
+
 // opMethodFor 运算符 → Operation 协议方法名（dynamic 接口分发）。
 func opMethodFor(op string) string {
 	switch op {
@@ -2057,7 +2067,7 @@ func (c *checker) inferCall(x *CallExpr, sc *cScope) (*Type, error) {
 		}
 		fn := c.bestMatchT(defs, argTys)
 		if fn == nil {
-			return nil, c.errf(id.Pos, "CompileError: 未找到匹配重载 %q", id.Name)
+			return nil, c.errf(id.Pos, "%s", overloadErrT(c.allDefs(id.Name), id.Name, len(x.Args)))
 		}
 		if err := c.checkCallArgs(fn, x.Args, sc, x.Pos); err != nil {
 			return nil, err

@@ -597,7 +597,6 @@ fn main(io IOStream) {
 	}
 }
 
-
 func TestProgramLibraryNotRunnable(t *testing.T) {
 	_, err := runSrc(t, `fn main(io IOStream) {
     io.println("never");
@@ -651,7 +650,6 @@ pub struct {
 	}
 }
 
-
 // 参数列表与调用分隔符 () [] {} 可互换；参数个数不限但调用必须匹配
 func TestMacroDelimitersAndArity(t *testing.T) {
 	out, err := runSrc(t, `#macro add [a, b] {
@@ -682,7 +680,6 @@ fn main(io IOStream) {
 	}
 }
 
-
 func TestDeleteReclaimsBlock(t *testing.T) {
 	prog, err := Compile(`fn main(io IOStream) {
     l List<int> = [1, 2, 3];
@@ -700,18 +697,6 @@ func TestDeleteReclaimsBlock(t *testing.T) {
 	}
 	if n := in.mem.BlockCount(); n != 0 {
 		t.Fatalf("expected 0 blocks after delete+compact, got %d", n)
-	}
-}
-
-// program 预制宏必须写在程序末尾（节点接入先后顺序）
-func TestProgramMustBeLast(t *testing.T) {
-	_, err := Compile(`program main;
-
-fn main(io IOStream) {
-    io.println(1);
-}`)
-	if err == nil || !strings.Contains(err.Error(), "program 预制宏必须写在程序末尾") {
-		t.Fatalf("got %v", err)
 	}
 }
 
@@ -741,5 +726,29 @@ func TestNewBadAlloc(t *testing.T) {
 }`)
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// program 声明位置：前后均可（用户确认：program main; 在前/后无关系）
+func TestProgramPlacementAnywhere(t *testing.T) {
+	out, err := runSrc(t, `program main;
+fn main(io IOStream) {
+    io.println("front-ok");
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "front-ok\n" {
+		t.Fatalf("got %q", out)
+	}
+	out, err = runSrc(t, `fn main(io IOStream) {
+    io.println("back-ok");
+}
+program main;`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "back-ok\n" {
+		t.Fatalf("got %q", out)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"container/heap"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -2180,6 +2181,118 @@ func (in *interp) registerIOBuiltins() {
 			return NilV(), &RunError{Msg: "IOError: 响应超过 8MiB 上限", Pos: pos, Ctx: ctx}
 		}
 		return StrV(string(body)), nil
+	}
+
+	// [json 库原语] json 序列化/反序列化
+	in.builtins["qkjson_dumps"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+		if len(args) != 1 {
+			return NilV(), &RunError{Msg: "TypeError: qkjson_dumps(v) 需要一个参数", Pos: pos, Ctx: ctx}
+		}
+		obj, err := qkjsonV(args[0])
+		if err != nil {
+			return NilV(), &RunError{Msg: fmt.Sprintf("JSONError: %v", err), Pos: pos, Ctx: ctx}
+		}
+		b, err := json.Marshal(obj)
+		if err != nil {
+			return NilV(), &RunError{Msg: fmt.Sprintf("JSONError: %v", err), Pos: pos, Ctx: ctx}
+		}
+		return StrV(string(b)), nil
+	}
+	in.builtins["qkjson_loads"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+		if len(args) != 1 || !args[0].IsStr() {
+			return NilV(), &RunError{Msg: "TypeError: qkjson_loads(s String)", Pos: pos, Ctx: ctx}
+		}
+		var raw interface{}
+		if err := json.Unmarshal([]byte(args[0].Str()), &raw); err != nil {
+			return NilV(), &RunError{Msg: fmt.Sprintf("JSONError: %v", err), Pos: pos, Ctx: ctx}
+		}
+		return qkjsonFromGo(raw)
+	}
+}
+
+// qkjsonFromGo 把 json.Unmarshal 结果转为 Value（HashTable / List / 标量；整数值视作 int）。
+func qkjsonFromGo(raw interface{}) (Value, error) {
+	switch t := raw.(type) {
+	case nil:
+		return NilV(), nil
+	case bool:
+		return BoolV(t), nil
+	case float64:
+		if t == float64(int64(t)) && t >= -1<<31 && t < 1<<31 {
+			return IntV(int64(int32(t))), nil
+		}
+		return FloatV(t), nil
+	case string:
+		return StrV(t), nil
+	case []interface{}:
+		lst := NewList()
+		for _, it := range t {
+			v, err := qkjsonFromGo(it)
+			if err != nil {
+				return NilV(), err
+			}
+			lst.Append(v)
+		}
+		return ListV(lst), nil
+	case map[string]interface{}:
+		h := NewHashTable()
+		for k, it := range t {
+			v, err := qkjsonFromGo(it)
+			if err != nil {
+				return NilV(), err
+			}
+			h.m[k] = v
+		}
+		return TableV(h), nil
+	}
+	return StrV(fmt.Sprintf("%v", raw)), nil
+}
+
+// qkjsonV 把 Value 转为 JSON 可序列化的 Go 对象（round-trip 安全）。
+func qkjsonV(v Value) (interface{}, error) {
+	switch {
+	case v.IsNil():
+		return nil, nil
+	case v.IsInt():
+		return v.Int(), nil
+	case v.IsFloat():
+		return v.Float(), nil
+	case v.IsBool():
+		return v.Bool(), nil
+	case v.IsStr():
+		return v.Str(), nil
+	case v.IsList():
+		out := make([]interface{}, 0, v.List().Size())
+		l := v.List()
+		for l.Head() != l.Tail() {
+			it, err := l.Next()
+			if err != nil {
+				return nil, err
+			}
+			got, err := qkjsonV(it)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, got)
+		}
+		return out, nil
+	case v.IsTable():
+		out := map[string]interface{}{}
+		// 直接遍历内部 map 深拷贝值；键还原为原生键（剥离 hashKey 的 "TypeName:" 前缀）
+		for k, it := range v.Table().m {
+			got, err := qkjsonV(it)
+			if err != nil {
+				return nil, err
+			}
+			key := k
+			if i := strings.IndexByte(k, ':'); i >= 0 {
+				key = k[i+1:]
+			}
+			out[key] = got
+		}
+		return out, nil
+	default:
+		return v.String(), nil // 其它类型 JSON 化字符串
 	}
 }
 

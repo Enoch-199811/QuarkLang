@@ -71,6 +71,7 @@ cd compiler && go build -o qkc .
 
 | 项目 | 说明 | 仓库 |
 |---|---|---|
+| QuarkLangLibs-Json | 官方认证的 `json` 库：Python 风格 `json::dumps` / `json::loads`（值↔JSON，对象→HashTable/数组→List/整数→int，非法输入报 JSONError） | https://github.com/Enoch-199811/QuarkLangLibs-Json |
 | QuarkLangLibs-Actions | 官方认证的 `actions` 库（两级）：`space` 系统级函数（`system`/`network` 空间，`exec`/`execv`/`popen`/`get`/`post`）+ `Command`/`Network` 类实现 `Executor` 接口（`self Self`，`.exec()`）；含 shell 注入说明与 8 MiB/10s 上限 | https://github.com/Enoch-199811/QuarkLangLibs-Actions |
 
 使用：把 `actions.qk` 放在与源码同目录，`import "actions";` 后调用 `exec(...)` / `execv(...)` / `popen(...)`。

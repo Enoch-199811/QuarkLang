@@ -121,7 +121,7 @@ func assignable(from, to *Type) bool {
 		return true
 	}
 	if from.Kind == tAny {
-		return false
+		return true // any 可赋给任意具体类型（运行时值兼容；json.loads 等动态解析场景）
 	}
 	if from.Kind == tNil {
 		return false
@@ -141,6 +141,10 @@ func assignable(from, to *Type) bool {
 	}
 	// 类型变量（泛型函数）：与任何类型互相可赋
 	if from.Kind == tTypeVar || to.Kind == tTypeVar {
+		return true
+	}
+	// any（interface{}）：可赋给任意具体类型（运行时值兼容；json.loads 等动态解析场景）
+	if from.Kind == tAny || to.Kind == tAny {
 		return true
 	}
 	// Copyd：与内部类型互相可赋
@@ -658,7 +662,7 @@ func (c *checker) substType(s string, subst map[string]*Type, pos Pos) (*Type, e
 // isBuiltinFuncName 判断是否为内置函数（可作为函数引用传递）。
 func isBuiltinFuncName(s string) bool {
 	switch s {
-	case "rand", "sum", "FileInputStream", "FileOutputStream", "ifstream", "ofstream", "iofstream", "ConsoleInputStream", "ConsoleOutputStream", "qkexec", "qkexecv", "qkpopen", "qkhttp_get", "qkhttp_post":
+	case "rand", "sum", "FileInputStream", "FileOutputStream", "ifstream", "ofstream", "iofstream", "ConsoleInputStream", "ConsoleOutputStream", "qkexec", "qkexecv", "qkpopen", "qkhttp_get", "qkhttp_post", "qkjson_dumps", "qkjson_loads":
 		return true
 	}
 	return false
@@ -1741,6 +1745,19 @@ func (c *checker) inferCall(x *CallExpr, sc *cScope) (*Type, error) {
 			return nil, c.errf(id.Pos, "TypeError: qkhttp_get requires url String, got %s", args[0])
 		}
 		return tStringV, nil
+	case "qkjson_dumps":
+		if err := c.checkArity("qkjson_dumps", 1, len(args), id.Pos); err != nil {
+			return nil, err
+		}
+		return tStringV, nil
+	case "qkjson_loads":
+		if err := c.checkArity("qkjson_loads", 1, len(args), id.Pos); err != nil {
+			return nil, err
+		}
+		if args[0].Kind != tString {
+			return nil, c.errf(id.Pos, "TypeError: qkjson_loads requires String, got %s", args[0])
+		}
+		return tAnyV, nil
 	case "qkhttp_post":
 		if len(args) != 3 && len(args) != 4 {
 			return nil, c.errf(id.Pos, "CompileError: qkhttp_post expects 3-4 args (url, body, ct[, retries]), got %d", len(args))

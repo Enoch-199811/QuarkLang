@@ -780,7 +780,7 @@ func (c *checker) substType(s string, subst map[string]*Type, pos Pos) (*Type, e
 // isBuiltinFuncName 判断是否为内置函数（可作为函数引用传递）。
 func isBuiltinFuncName(s string) bool {
 	switch s {
-	case "rand", "sum", "FileInputStream", "FileOutputStream", "ifstream", "ofstream", "iofstream", "ConsoleInputStream", "ConsoleOutputStream", "qkexec", "qkexecv", "qkpopen", "qkhttp_get", "qkhttp_post", "qkjson_dumps", "qkjson_loads", "qkcleg_create", "qkcleg_clear", "qkcleg_rect", "qkcleg_text", "qkcleg_frame":
+	case "rand", "sum", "FileInputStream", "FileOutputStream", "ifstream", "ofstream", "iofstream", "ConsoleInputStream", "ConsoleOutputStream", "qkexec", "qkexecv", "qkpopen", "qkhttp_get", "qkhttp_post", "qkjson_dumps", "qkjson_loads", "qkcleg_create", "qkscreen_open", "qkscreen_present", "qkscreen_close", "qkcleg_clear", "qkcleg_rect", "qkcleg_text", "qkcleg_frame":
 		return true
 	}
 	return false
@@ -1986,6 +1986,16 @@ func (c *checker) inferCall(x *CallExpr, sc *cScope) (*Type, error) {
 			return nil, c.errf(id.Pos, "TypeError: qkhttp_get requires url String, got %s", args[0])
 		}
 		return tStringV, nil
+	case "qkscreen_open":
+		if err := c.checkArity(id.Name, 3, len(args), id.Pos); err != nil {
+			return nil, err
+		}
+		return tNilV, nil
+	case "qkscreen_present", "qkscreen_close":
+		if err := c.checkArity(id.Name, 0, len(args), id.Pos); err != nil {
+			return nil, err
+		}
+		return tNilV, nil
 	case "qkcleg_create":
 		if err := c.checkArity(id.Name, 2, len(args), id.Pos); err != nil {
 			return nil, err

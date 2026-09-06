@@ -2284,6 +2284,31 @@ func (in *interp) registerIOBuiltins() {
 		}
 		return qkjsonFromGo(raw)
 	}
+	// [cleg 屏幕宿主] 跨系统窗口呈现（X11/GDI）
+	in.builtins["qkscreen_open"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+		if len(args) != 3 || !args[0].IsInt() || !args[1].IsInt() || !args[2].IsStr() {
+			return NilV(), &RunError{Msg: "TypeError: qkscreen_open(w int, h int, title String)", Pos: pos, Ctx: ctx}
+		}
+		if err := screenOpen(int(args[0].Int()), int(args[1].Int()), args[2].Str()); err != nil {
+			return NilV(), &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
+		}
+		return NilV(), nil
+	}
+	in.builtins["qkscreen_present"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+		if len(args) != 0 {
+			return NilV(), &RunError{Msg: "TypeError: qkscreen_present()", Pos: pos, Ctx: ctx}
+		}
+		if err := screenPresent(in.fb); err != nil {
+			return NilV(), &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
+		}
+		return NilV(), nil
+	}
+	in.builtins["qkscreen_close"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+		if err := screenClose(); err != nil {
+			return NilV(), &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
+		}
+		return NilV(), nil
+	}
 	// [cleg 渲染原语] CPU 光栅帧缓冲（性能极限：线性 u32、预分配、零分配热路径）
 	in.builtins["qkcleg_create"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
 		if len(args) != 2 || !args[0].IsInt() || !args[1].IsInt() {

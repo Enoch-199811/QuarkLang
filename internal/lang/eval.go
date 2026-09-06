@@ -301,6 +301,7 @@ type InterfaceDef struct {
 	Name    string
 	Methods []MethodSig
 	Expands []string // expand interface 组合接口
+	Partial bool     // 可选实现接口（事件族）：缺少方法不报错（emit 运行时忽略）
 }
 
 // ImplDef is a registered impl block: Methods are static (no self), SelfMethods
@@ -2571,9 +2572,18 @@ func (in *interp) registerIOBuiltins() {
 			return NilV(), &RunError{Msg: "TypeError: qksignal_emit(node, name String [, args...])", Pos: pos, Ctx: ctx}
 		}
 		node := args[0]
-		if fn := in.selfMethodOf(node.Struct().SType, args[1].Str()); fn != nil {
+		name := args[1].Str()
+		// 短名归一化：clicked → onClicked（先直查全名，未命中则 on+首字母大写）
+		if fn := in.selfMethodOf(node.Struct().SType, name); fn != nil {
 			callArgs := append([]Value{node}, args[2:]...)
 			return in.callFunc(fn, callArgs, pos, ctx.depth)
+		}
+		if name != "" && name[0] != 'o' {
+			onName := "on" + strings.ToUpper(name[:1]) + name[1:]
+			if fn := in.selfMethodOf(node.Struct().SType, onName); fn != nil {
+				callArgs := append([]Value{node}, args[2:]...)
+				return in.callFunc(fn, callArgs, pos, ctx.depth)
+			}
 		}
 		return NilV(), nil
 	}

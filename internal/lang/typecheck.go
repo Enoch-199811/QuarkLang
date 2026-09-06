@@ -496,6 +496,9 @@ func builtinOperationIfaces() map[string]*InterfaceDef {
 func registerBuiltinIfaces(intfs map[string]*InterfaceDef) {
 	for name, def := range builtinOperationIfaces() {
 		if _, ok := intfs[name]; !ok {
+			if strings.HasPrefix(name, "Cleg") {
+				def.Partial = true // 事件接口族：可选实现
+			}
 			intfs[name] = def
 		}
 	}
@@ -602,6 +605,10 @@ func Typecheck(prog *Program) error {
 		iface, ok := c.interfaces[im.Iface]
 		if !ok {
 			return &CheckError{Msg: fmt.Sprintf("CompileError: unknown interface %q", im.Iface), Pos: im.Pos}
+		}
+		if iface.Partial {
+			// 可选实现接口：部分方法即可（运行时 emit 只触发实现的方法）
+			continue
 		}
 		// 组合接口：递归收集 expand 展开的方法（含 expand 接口的 Expands 递归）
 		methods := append([]MethodSig{}, iface.Methods...)
@@ -2361,6 +2368,9 @@ func (c *checker) checkImplements(typ, iface string) error {
 	def, ok := c.interfaces[iface]
 	if !ok {
 		return fmt.Errorf("未知接口 %s", iface)
+	}
+	if def.Partial {
+		return nil // 可选实现：不做全量要求
 	}
 	methods := append([]MethodSig{}, def.Methods...)
 	for _, ex := range def.Expands {

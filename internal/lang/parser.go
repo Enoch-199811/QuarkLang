@@ -168,7 +168,11 @@ func compileSlow(src string) (*Program, error) {
 	return prog, nil
 }
 
-func (p *parser) cur() Token              { return p.toks[p.i] }
+func (p *parser) cur() Token { return p.toks[p.i] }
+func (p *parser) peekTextIs(t string) bool {
+	return p.i+1 < len(p.toks) && p.toks[p.i+1].Kind != TEOF && p.toks[p.i+1].Text == t
+}
+
 func (p *parser) peekIs(k TokenKind) bool { return p.i+1 < len(p.toks) && p.toks[p.i+1].Kind == k }
 
 func (p *parser) peek() Token {
@@ -659,6 +663,11 @@ func (p *parser) parseStructName(sd *StructDecl) error {
 
 // parseMethodSig parses an interface method signature: "fn name(params) Ret;".
 func (p *parser) parseMethodSig() (MethodSig, error) {
+	dyn := false
+	if p.curIs(TIdent) && p.cur().Text == "dynamic" {
+		p.advance()
+		dyn = true
+	}
 	kw, err := p.expect(TFunc, "'fn'")
 	if err != nil {
 		return MethodSig{}, err
@@ -674,7 +683,7 @@ func (p *parser) parseMethodSig() (MethodSig, error) {
 	if err != nil {
 		return MethodSig{}, err
 	}
-	sig := MethodSig{Name: name.Text, Params: params, Pos: Pos{Line: kw.Line, Col: kw.Col}}
+	sig := MethodSig{Name: name.Text, Params: params, Dynamic: dyn, Pos: Pos{Line: kw.Line, Col: kw.Col}}
 	if p.curIs(TIdent) || p.curIs(TInterface) {
 		typ, err := p.parseType()
 		if err != nil {
@@ -702,8 +711,11 @@ func (p *parser) parseInterface() (*InterfaceDecl, error) {
 		if p.curIs(TEOF) {
 			return nil, p.errf(p.cur(), "unterminated interface body (missing '}')")
 		}
-		// expand interface Name; 组合接口行（xmind §接口）
-		if p.curIs(TIdent) && p.cur().Text == "expand" {
+		// expand interface Name; 组合接口行（xmind §接口；可带 dynamic 前缀）
+		if p.curIs(TIdent) && (p.cur().Text == "expand" || (p.cur().Text == "dynamic" && p.peekTextIs("expand"))) {
+			if p.cur().Text == "dynamic" {
+				p.advance()
+			}
 			p.advance()
 			if _, err := p.expect(TInterface, "'interface'"); err != nil {
 				return nil, err

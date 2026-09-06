@@ -304,6 +304,19 @@ func (l *List) AppendAll(o *List) {
 	}
 }
 
+// setIndex 写 i-th 可见元素（0-based，相对 head）；越界报错。
+func (l *List) setIndex(i int, v Value) error {
+	idx := l.head + i
+	if i < 0 || idx >= l.tail {
+		return &RunError{Msg: fmt.Sprintf("IndexOutOfBoundsError: index %d out of range [0,%d)", i, l.Size())}
+	}
+	l.items[idx] = v
+	if l.mem != nil {
+		l.mem.MarkDirty(l.blockID)
+	}
+	return nil
+}
+
 // Get returns the i-th visible element (0-based, relative to head).
 func (l *List) Get(i int) (Value, error) {
 	idx := l.head + i
@@ -652,4 +665,15 @@ func deepCopy(v Value) Value {
 		return TableV(h)
 	}
 	return v
+}
+
+// implDefsFor 聚合某类型所有 impl（无接口 + 各接口实现）。
+func (in *interp) implDefsFor(typ string) []*ImplDef {
+	var out []*ImplDef
+	for k, d := range in.impls {
+		if strings.HasPrefix(k, typ) && (len(k) == len(typ) || (len(k) > len(typ) && k[len(typ)] == '\x00')) {
+			out = append(out, d)
+		}
+	}
+	return out
 }

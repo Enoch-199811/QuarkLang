@@ -87,10 +87,11 @@ type StructDecl struct {
 
 // MethodSig is an interface method signature (no body).
 type MethodSig struct {
-	Name   string
-	Params []Param
-	Ret    string
-	Pos    Pos
+	Name    string
+	Params  []Param
+	Ret     string
+	Dynamic bool // 接口方法 dynamic 修饰：运行时动态分发（Operation 等协议基于此）
+	Pos     Pos
 }
 
 // InterfaceDecl is an interface declaration.

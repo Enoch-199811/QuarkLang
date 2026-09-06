@@ -363,6 +363,87 @@ type checker struct {
 }
 
 // Typecheck 执行 §11.1 的全部编译期严格检查。
+// implKeyOf 多 impl 键：无接口（自我实现/静态）= Type；接口实现 = Type + "\x00" + Iface。
+func implKeyOf(typ, iface string) string {
+	if iface == "" {
+		return typ
+	}
+	return typ + "\x00" + iface
+}
+
+// implDefsFor 聚合某类型所有 impl（无接口 + 各接口实现；多 impl 方法不重叠）。
+func (c *checker) implDefsFor(typ string) []*ImplDef {
+	var out []*ImplDef
+	for k, d := range c.impls {
+		if strings.HasPrefix(k, typ) && (len(k) == len(typ) || (len(k) > len(typ) && k[len(typ)] == '\x00')) {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// opMethodFor 运算符 → Operation 协议方法名（dynamic 接口分发）。
+func opMethodFor(op string) string {
+	switch op {
+	case "+":
+		return "add"
+	case "-":
+		return "sub"
+	case "*":
+		return "mul"
+	case "/":
+		return "div"
+	case "%":
+		return "mod"
+	case "==":
+		return "eq"
+	case "!=":
+		return "ne"
+	case "<":
+		return "lt"
+	case "<=":
+		return "le"
+	case ">":
+		return "gt"
+	case ">=":
+		return "ge"
+	}
+	return ""
+}
+
+// builtinOperationIfaces 语言内置 Operation 接口族（dynamic 协议；多 impl 方法不重叠）。
+func builtinOperationIfaces() map[string]*InterfaceDef {
+	self2 := []Param{{Name: "self", Type: "Self"}, {Name: "o", Type: "Self"}}
+	self1 := []Param{{Name: "self", Type: "Self"}}
+	fn := func(n string, p []Param, ret string) MethodSig {
+		return MethodSig{Name: n, Params: p, Ret: ret, Dynamic: true}
+	}
+	return map[string]*InterfaceDef{
+		"AddOperation": {Name: "AddOperation", Methods: []MethodSig{fn("add", self2, "Self")}},
+		"SubOperation": {Name: "SubOperation", Methods: []MethodSig{fn("sub", self2, "Self")}},
+		"MulOperation": {Name: "MulOperation", Methods: []MethodSig{fn("mul", self2, "Self")}},
+		"DivOperation": {Name: "DivOperation", Methods: []MethodSig{fn("div", self2, "Self")}},
+		"ModOperation": {Name: "ModOperation", Methods: []MethodSig{fn("mod", self2, "Self")}},
+		"NegOperation": {Name: "NegOperation", Methods: []MethodSig{fn("neg", self1, "Self")}},
+		"EqOperation":  {Name: "EqOperation", Methods: []MethodSig{fn("eq", self2, "bool")}},
+		"NeOperation":  {Name: "NeOperation", Methods: []MethodSig{fn("ne", self2, "bool")}},
+		"LtOperation":  {Name: "LtOperation", Methods: []MethodSig{fn("lt", self2, "bool")}},
+		"LeOperation":  {Name: "LeOperation", Methods: []MethodSig{fn("le", self2, "bool")}},
+		"GtOperation":  {Name: "GtOperation", Methods: []MethodSig{fn("gt", self2, "bool")}},
+		"GeOperation":  {Name: "GeOperation", Methods: []MethodSig{fn("ge", self2, "bool")}},
+		"Operation":    {Name: "Operation", Expands: []string{"AddOperation", "SubOperation", "MulOperation", "DivOperation", "ModOperation", "NegOperation", "EqOperation", "NeOperation", "LtOperation", "LeOperation", "GtOperation", "GeOperation"}},
+	}
+}
+
+// registerBuiltinIfaces 预注册内置接口（typecheck 与 eval 共用）。
+func registerBuiltinIfaces(intfs map[string]*InterfaceDef) {
+	for name, def := range builtinOperationIfaces() {
+		if _, ok := intfs[name]; !ok {
+			intfs[name] = def
+		}
+	}
+}
+
 func Typecheck(prog *Program) error {
 	c := &checker{
 		fns:        map[string]*Func{},
@@ -372,6 +453,7 @@ func Typecheck(prog *Program) error {
 		impls:      map[string]*ImplDef{},
 		aliases:    map[string]string{},
 	}
+	registerBuiltinIfaces(c.interfaces)
 	for _, a := range prog.TypeAliases {
 		if _, dup := c.aliases[a.Name]; dup {
 			return &CheckError{Msg: fmt.Sprintf("CompileError: duplicate type alias %q", a.Name), Pos: a.Pos}
@@ -422,18 +504,12 @@ func Typecheck(prog *Program) error {
 				return &CheckError{Msg: fmt.Sprintf("CompileError: struct %s has no type parameters, but impl declares %d", im.Type, len(im.TypeParams)), Pos: im.Pos}
 			}
 		}
-		def, ok := c.impls[im.Type]
-		if !ok {
-			def = &ImplDef{Type: im.Type, Iface: im.Iface, TypeParams: im.TypeParams, Methods: map[string]*Func{}, SelfMethods: map[string]*Func{}}
-			c.impls[im.Type] = def
-		} else {
-			if def.Iface == "" && im.Iface != "" {
-				def.Iface = im.Iface
-			}
-			if len(def.TypeParams) == 0 {
-				def.TypeParams = im.TypeParams
-			}
+		key := implKeyOf(im.Type, im.Iface)
+		if _, dup := c.impls[key]; dup {
+			return &CheckError{Msg: fmt.Sprintf("CompileError: duplicate impl %s for %s", im.Iface, im.Type), Pos: im.Pos}
 		}
+		def := &ImplDef{Type: im.Type, Iface: im.Iface, TypeParams: im.TypeParams, Methods: map[string]*Func{}, SelfMethods: map[string]*Func{}}
+		c.impls[key] = def
 		for _, m := range im.Methods {
 			if len(m.Params) > 0 && m.Params[0].Name == "self" && m.Params[0].Type == "" {
 				m.Params[0].Type = im.Type
@@ -461,7 +537,7 @@ func Typecheck(prog *Program) error {
 		if !ok {
 			return &CheckError{Msg: fmt.Sprintf("CompileError: unknown interface %q", im.Iface), Pos: im.Pos}
 		}
-		def := c.impls[im.Type]
+		def := c.impls[implKeyOf(im.Type, im.Iface)]
 		// 组合接口：递归收集 expand 展开的方法
 		methods := iface.Methods
 		for _, ex := range iface.Expands {
@@ -1099,6 +1175,13 @@ func (c *checker) infer(e Expr, sc *cScope) (*Type, error) {
 			}
 			return t.Elem, nil
 		case "-":
+			if t.Kind == tStruct {
+				for _, def := range c.implDefsFor(t.FName) {
+					if fn := def.SelfMethods["neg"]; fn != nil {
+						return c.resolveType(fn.Ret, x.Pos)
+					}
+				}
+			}
 			if t.Kind != tInt && t.Kind != tFloat {
 				return nil, c.errf(x.Pos, "TypeError: unary '-' requires a number, got %s", t)
 			}
@@ -1166,6 +1249,16 @@ func (c *checker) inferBin(x *BinOp, sc *cScope) (*Type, error) {
 	r, err := c.infer(x.R, sc)
 	if err != nil {
 		return nil, err
+	}
+	// Operation 运算符重载：同 struct 且聚合法命中 → 返回方法类型
+	if l.Kind == tStruct && r.Kind == tStruct && l.FName == r.FName {
+		if m := opMethodFor(x.Op); m != "" {
+			for _, def := range c.implDefsFor(l.FName) {
+				if fn := def.SelfMethods[m]; fn != nil && len(fn.Params) == 2 {
+					return c.resolveType(fn.Ret, x.Pos)
+				}
+			}
+		}
 	}
 	switch x.Op {
 	case "+":

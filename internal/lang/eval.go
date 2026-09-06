@@ -377,6 +377,7 @@ func runWithInterp(prog *Program, filename string, args []string, stdin io.Reade
 		}
 		in.structs[s.Name] = def
 	}
+	registerBuiltinIfaces(in.interfaces)
 	for _, i := range prog.Interfaces {
 		if _, dup := in.interfaces[i.Name]; dup {
 			return nil, fmt.Errorf("CompileError: duplicate interface %q", i.Name)
@@ -384,18 +385,12 @@ func runWithInterp(prog *Program, filename string, args []string, stdin io.Reade
 		in.interfaces[i.Name] = &InterfaceDef{Name: i.Name, Methods: i.Methods, Expands: i.Expands}
 	}
 	for _, im := range prog.Impls {
-		def, ok := in.impls[im.Type]
-		if !ok {
-			def = &ImplDef{Type: im.Type, Iface: im.Iface, TypeParams: im.TypeParams, Methods: map[string]*Func{}, SelfMethods: map[string]*Func{}}
-			in.impls[im.Type] = def
-		} else {
-			if def.Iface == "" && im.Iface != "" {
-				def.Iface = im.Iface
-			}
-			if len(def.TypeParams) == 0 {
-				def.TypeParams = im.TypeParams
-			}
+		key := implKeyOf(im.Type, im.Iface)
+		if _, dup := in.impls[key]; dup {
+			return nil, fmt.Errorf("CompileError: duplicate impl %s for %s", im.Iface, im.Type)
 		}
+		def := &ImplDef{Type: im.Type, Iface: im.Iface, TypeParams: im.TypeParams, Methods: map[string]*Func{}, SelfMethods: map[string]*Func{}}
+		in.impls[key] = def
 		for _, m := range im.Methods {
 			if len(m.Params) > 0 && m.Params[0].Name == "self" && m.Params[0].Type == "" {
 				m.Params[0].Type = im.Type
@@ -835,6 +830,11 @@ func (in *interp) evalExpr(e Expr, sc *scope, ctx *execCtx) (Value, error) {
 			if v.IsFloat() {
 				return FloatV(-v.Float()), nil
 			}
+			if v.IsStruct() {
+				if fn := in.selfMethodOf(v.Struct().SType, "neg"); fn != nil {
+					return in.callFunc(fn, []Value{v}, x.Pos, ctx.depth)
+				}
+			}
 			return NilV(), &RunError{Msg: fmt.Sprintf("TypeError: unary '-' requires a number, got %s", v.TypeName()), Pos: x.Pos, Ctx: ctx}
 		case "!":
 			b, err := truthy(v)
@@ -848,6 +848,18 @@ func (in *interp) evalExpr(e Expr, sc *scope, ctx *execCtx) (Value, error) {
 		l, err := in.evalExpr(x.L, sc, ctx)
 		if err != nil {
 			return NilV(), err
+		}
+		// Operation 运算符重载：两侧同 struct 且聚合方法命中 → 调用协议方法
+		if l.IsStruct() && x.Op != "&&" && x.Op != "||" {
+			if rv, err := in.evalExpr(x.R, sc, ctx); err == nil {
+				if rv.IsStruct() && l.Struct().SType == rv.Struct().SType {
+					if m := opMethodFor(x.Op); m != "" {
+						if fn := in.selfMethodOf(l.Struct().SType, m); fn != nil {
+							return in.callFunc(fn, []Value{l, rv}, x.Pos, ctx.depth)
+						}
+					}
+				}
+			}
 		}
 		// 快路径：两侧都是 int 的算术/位移直通（免 binOp 分发，fib/循环类大热）
 		if l.IsInt() && x.Op != "&&" && x.Op != "||" {
@@ -1671,15 +1683,11 @@ func (in *interp) callMethod(obj Value, name string, args []Value, ctx *execCtx,
 		}
 	} else if obj.IsStruct() {
 		o := obj.Struct()
-		def, ok := in.impls[o.SType]
-		if !ok {
-			return NilV(), &RunError{Msg: fmt.Sprintf("TypeError: type %s has no impl", o.SType), Pos: pos, Ctx: ctx}
-		}
-		if fn, ok := def.SelfMethods[name]; ok {
+		if fn := in.selfMethodOf(o.SType, name); fn != nil {
 			callArgs := append([]Value{obj}, args...)
 			return in.callFunc(fn, callArgs, pos, ctx.depth)
 		}
-		if _, ok := def.Methods[name]; ok {
+		if in.staticMethodOf(o.SType, name) != nil {
 			return NilV(), &RunError{Msg: fmt.Sprintf("TypeError: %s.%s is a static method; call it via %s::%s(...)", o.SType, name, o.SType, name), Pos: pos, Ctx: ctx}
 		}
 	}
@@ -1802,13 +1810,30 @@ func (in *interp) evalScopeCall(x *ScopeCall, sc *scope, ctx *execCtx) (Value, e
 		}
 		return NilV(), &RunError{Msg: fmt.Sprintf("TypeError: IO has no static method %q", x.Name), Pos: x.Pos, Ctx: ctx}
 	}
-	if def, ok := in.impls[x.Scope]; ok {
-		if fn, ok := def.Methods[x.Name]; ok {
-			return in.callFunc(fn, args, x.Pos, ctx.depth)
-		}
-		return NilV(), &RunError{Msg: fmt.Sprintf("TypeError: %s has no static method %q", x.Scope, x.Name), Pos: x.Pos, Ctx: ctx}
+	if fn := in.staticMethodOf(x.Scope, x.Name); fn != nil {
+		return in.callFunc(fn, args, x.Pos, ctx.depth)
 	}
 	return NilV(), &RunError{Msg: fmt.Sprintf("CompileError: unknown scope %q", x.Scope), Pos: x.Pos, Ctx: ctx}
+}
+
+// selfMethodOf 聚合多 impl 查找实例方法（self 首参）。
+func (in *interp) selfMethodOf(typ, name string) *Func {
+	for _, d := range in.implDefsFor(typ) {
+		if fn := d.SelfMethods[name]; fn != nil {
+			return fn
+		}
+	}
+	return nil
+}
+
+// staticMethodOf 聚合多 impl 查找静态方法（无 self 首参）。
+func (in *interp) staticMethodOf(typ, name string) *Func {
+	for _, d := range in.implDefsFor(typ) {
+		if fn := d.Methods[name]; fn != nil {
+			return fn
+		}
+	}
+	return nil
 }
 
 // fileInputStreamBuiltin 打开文件输入流（ifstream/FileInputStream 共用）。

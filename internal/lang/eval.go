@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
@@ -1906,6 +1907,48 @@ func (in *interp) registerIOBuiltins() {
 			return NilV(), &RunError{Msg: "IOError: qkpopen 输出超过 8MB 上限", Pos: pos, Ctx: ctx}
 		}
 		return InV(&InputStream{R: bytes.NewReader(out)}), nil
+	} // [actions 库原语] 网络层：qkhttp_get(url) -> String（10s 超时，8MiB 响应上限）
+	in.builtins["qkhttp_get"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+		if len(args) != 1 || !args[0].IsStr() {
+			return NilV(), &RunError{Msg: "TypeError: qkhttp_get(url String) 需要一个 URL", Pos: pos, Ctx: ctx}
+		}
+		cli := &http.Client{Timeout: 10 * time.Second}
+		resp, err := cli.Get(args[0].Str())
+		if err != nil {
+			return NilV(), &RunError{Msg: fmt.Sprintf("IOError: 请求失败：%v", err), Pos: pos, Ctx: ctx}
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20+1))
+		if err != nil {
+			return NilV(), &RunError{Msg: fmt.Sprintf("IOError: 读取响应失败：%v", err), Pos: pos, Ctx: ctx}
+		}
+		if len(body) > 8<<20 {
+			return NilV(), &RunError{Msg: "IOError: 响应超过 8MiB 上限", Pos: pos, Ctx: ctx}
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return NilV(), &RunError{Msg: fmt.Sprintf("HTTPError: 状态码 %d", resp.StatusCode), Pos: pos, Ctx: ctx}
+		}
+		return StrV(string(body)), nil
+	}
+	// qkhttp_post(url, body String, contentType String) -> String
+	in.builtins["qkhttp_post"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+		if len(args) != 3 || !args[0].IsStr() || !args[1].IsStr() || !args[2].IsStr() {
+			return NilV(), &RunError{Msg: "TypeError: qkhttp_post(url, body String, contentType String)", Pos: pos, Ctx: ctx}
+		}
+		cli := &http.Client{Timeout: 10 * time.Second}
+		resp, err := cli.Post(args[0].Str(), args[2].Str(), strings.NewReader(args[1].Str()))
+		if err != nil {
+			return NilV(), &RunError{Msg: fmt.Sprintf("IOError: 请求失败：%v", err), Pos: pos, Ctx: ctx}
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20+1))
+		if err != nil {
+			return NilV(), &RunError{Msg: fmt.Sprintf("IOError: 读取响应失败：%v", err), Pos: pos, Ctx: ctx}
+		}
+		if len(body) > 8<<20 {
+			return NilV(), &RunError{Msg: "IOError: 响应超过 8MiB 上限", Pos: pos, Ctx: ctx}
+		}
+		return StrV(string(body)), nil
 	}
 }
 

@@ -658,7 +658,7 @@ func (c *checker) substType(s string, subst map[string]*Type, pos Pos) (*Type, e
 // isBuiltinFuncName 判断是否为内置函数（可作为函数引用传递）。
 func isBuiltinFuncName(s string) bool {
 	switch s {
-	case "rand", "sum", "FileInputStream", "FileOutputStream", "ifstream", "ofstream", "iofstream", "ConsoleInputStream", "ConsoleOutputStream", "qkexec", "qkexecv", "qkpopen":
+	case "rand", "sum", "FileInputStream", "FileOutputStream", "ifstream", "ofstream", "iofstream", "ConsoleInputStream", "ConsoleOutputStream", "qkexec", "qkexecv", "qkpopen", "qkhttp_get", "qkhttp_post":
 		return true
 	}
 	return false
@@ -1666,6 +1666,24 @@ func (c *checker) inferCall(x *CallExpr, sc *cScope) (*Type, error) {
 			return nil, c.errf(id.Pos, "TypeError: qkpopen requires a path String, got %s", args[0])
 		}
 		return tInputStreamV, nil
+	case "qkhttp_get":
+		if err := c.checkArity("qkhttp_get", 1, len(args), id.Pos); err != nil {
+			return nil, err
+		}
+		if args[0].Kind != tString {
+			return nil, c.errf(id.Pos, "TypeError: qkhttp_get requires url String, got %s", args[0])
+		}
+		return tStringV, nil
+	case "qkhttp_post":
+		if err := c.checkArity("qkhttp_post", 3, len(args), id.Pos); err != nil {
+			return nil, err
+		}
+		for _, a := range args {
+			if a.Kind != tString {
+				return nil, c.errf(id.Pos, "TypeError: qkhttp_post(url, body, contentType) 全部为 String")
+			}
+		}
+		return tStringV, nil
 	case "FileInputStream", "ifstream", "iofstream":
 		if err := c.checkArity("FileInputStream", 1, len(args), id.Pos); err != nil {
 			return nil, err

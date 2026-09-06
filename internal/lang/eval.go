@@ -2241,7 +2241,7 @@ func qkjsonFromGo(raw interface{}) (Value, error) {
 			if err != nil {
 				return NilV(), err
 			}
-			h.m[k] = v
+			h.m[hashKey(StrV(k))] = v // 键规整为 hashKey 格式（与 Put 一致，get/contains 可查）
 		}
 		return TableV(h), nil
 	}

@@ -2565,6 +2565,56 @@ func (in *interp) registerIOBuiltins() {
 		in.fb.reset(w, h)
 		return NilV(), nil
 	}
+	// [cleg 信号] qksignal_emit(node, name)：节点实现 onClicked 等方法则调用
+	in.builtins["qksignal_emit"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+		if len(args) != 2 || !args[0].IsStruct() || !args[1].IsStr() {
+			return NilV(), &RunError{Msg: "TypeError: qksignal_emit(node, name String)", Pos: pos, Ctx: ctx}
+		}
+		node := args[0]
+		if fn := in.selfMethodOf(node.Struct().SType, args[1].Str()); fn != nil {
+			return in.callFunc(fn, []Value{node}, pos, ctx.depth)
+		}
+		return NilV(), nil
+	}
+	// [cleg qss 读取] 原语版：get/num/cr
+	in.builtins["qkstyle_get"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+		if len(args) != 3 || !args[0].IsTable() || !args[2].IsStr() {
+			return NilV(), &RunError{Msg: "TypeError: qkstyle_get(style, key, fallback String)", Pos: pos, Ctx: ctx}
+		}
+		v, ok := args[0].Table().Get(args[1])
+		if ok && v.IsStr() {
+			return v, nil
+		}
+		return StrV(args[2].Str()), nil
+	}
+	in.builtins["qkstyle_num"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+		if len(args) != 3 || !args[0].IsTable() {
+			return NilV(), &RunError{Msg: "TypeError: qkstyle_num(style, key, fb int)", Pos: pos, Ctx: ctx}
+		}
+		v, ok := args[0].Table().Get(args[1])
+		if ok && v.IsStr() {
+			if n, err := strconv.Atoi(strings.TrimSpace(v.Str())); err == nil {
+				return IntV(int64(n)), nil
+			}
+		}
+		return args[2], nil
+	}
+	in.builtins["qkstyle_cr"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+		if len(args) != 4 || !args[0].IsTable() {
+			return NilV(), &RunError{Msg: "TypeError: qkstyle_cr(style, key, idx, fb int)", Pos: pos, Ctx: ctx}
+		}
+		v, ok := args[0].Table().Get(args[1])
+		idx := int(args[2].Int())
+		if ok && v.IsStr() {
+			parts := strings.Split(v.Str(), ",")
+			if idx < len(parts) {
+				if n, err := strconv.Atoi(strings.TrimSpace(parts[idx])); err == nil {
+					return IntV(int64(n)), nil
+				}
+			}
+		}
+		return args[3], nil
+	}
 	in.builtins["qkcleg_clear"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
 		if len(args) != 3 || !args[0].IsInt() || !args[1].IsInt() || !args[2].IsInt() {
 			return NilV(), &RunError{Msg: "TypeError: qkcleg_clear(r,g,b)", Pos: pos, Ctx: ctx}
@@ -2587,14 +2637,18 @@ func (in *interp) registerIOBuiltins() {
 		return NilV(), nil
 	}
 	in.builtins["qkcleg_text_ex"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
-		if len(args) != 8 || !args[6].IsStr() || !args[7].IsStr() {
+		if len(args) != 8 || !args[6].IsStr() {
 			return NilV(), &RunError{Msg: "TypeError: qkcleg_text_ex(x,y,size,r,g,b,text,fontChain)", Pos: pos, Ctx: ctx}
 		}
 		if in.fb == nil {
 			return NilV(), &RunError{Msg: "TypeError: 先 qkcleg_create", Pos: pos, Ctx: ctx}
 		}
+		chain := "monospace"
+		if args[7].IsStr() {
+			chain = args[7].Str()
+		}
 		in.fb.drawTextChain(int(args[0].Int()), int(args[1].Int()), args[6].Str(), int(args[2].Int()),
-			rgb(byte(args[3].Int()), byte(args[4].Int()), byte(args[5].Int())), args[7].Str())
+			rgb(byte(args[3].Int()), byte(args[4].Int()), byte(args[5].Int())), chain)
 		return NilV(), nil
 	}
 	in.builtins["qkcleg_roundrect"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {

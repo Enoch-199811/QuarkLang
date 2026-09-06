@@ -806,7 +806,7 @@ func (c *checker) substType(s string, subst map[string]*Type, pos Pos) (*Type, e
 // isBuiltinFuncName 判断是否为内置函数（可作为函数引用传递）。
 func isBuiltinFuncName(s string) bool {
 	switch s {
-	case "rand", "sum", "FileInputStream", "FileOutputStream", "ifstream", "ofstream", "iofstream", "ConsoleInputStream", "ConsoleOutputStream", "qkexec", "qkexecv", "qkpopen", "qkhttp_get", "qkhttp_post", "qkjson_dumps", "qkjson_loads", "qkfile_read", "qkfile_write", "qkcleg_style_load", "qkcleg_style_parse", "qkcleg_create", "qkscreen_open", "qkscreen_present", "qkscreen_close", "qkcleg_clear", "qkcleg_rect", "qkcleg_roundrect", "qkcleg_text", "qkcleg_text_ex", "qkcleg_frame":
+	case "rand", "sum", "FileInputStream", "FileOutputStream", "ifstream", "ofstream", "iofstream", "ConsoleInputStream", "ConsoleOutputStream", "qkexec", "qkexecv", "qkpopen", "qkhttp_get", "qkhttp_post", "qkjson_dumps", "qkjson_loads", "qkfile_read", "qkfile_write", "qkcleg_style_load", "qkcleg_style_parse", "qkcleg_create", "qksignal_emit", "qkstyle_get", "qkstyle_num", "qkstyle_cr", "qkscreen_open", "qkscreen_present", "qkscreen_close", "qkcleg_clear", "qkcleg_rect", "qkcleg_roundrect", "qkcleg_text", "qkcleg_text_ex", "qkcleg_frame":
 		return true
 	}
 	return false
@@ -2144,6 +2144,26 @@ func (c *checker) inferCall(x *CallExpr, sc *cScope) (*Type, error) {
 			return nil, err
 		}
 		return tNilV, nil
+	case "qksignal_emit":
+		if err := c.checkArity(id.Name, 2, len(args), id.Pos); err != nil {
+			return nil, err
+		}
+		return tNilV, nil
+	case "qkstyle_get":
+		if err := c.checkArity(id.Name, 3, len(args), id.Pos); err != nil {
+			return nil, err
+		}
+		return tStringV, nil
+	case "qkstyle_num":
+		if err := c.checkArity(id.Name, 3, len(args), id.Pos); err != nil {
+			return nil, err
+		}
+		return tIntV, nil
+	case "qkstyle_cr":
+		if err := c.checkArity(id.Name, 4, len(args), id.Pos); err != nil {
+			return nil, err
+		}
+		return tIntV, nil
 	case "qkcleg_create":
 		if err := c.checkArity(id.Name, 2, len(args), id.Pos); err != nil {
 			return nil, err

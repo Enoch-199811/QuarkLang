@@ -2067,6 +2067,12 @@ func (c *checker) inferCall(x *CallExpr, sc *cScope) (*Type, error) {
 		}
 		fn := c.bestMatchT(defs, argTys)
 		if fn == nil {
+			defs0 := c.allDefs(id.Name)
+			if len(defs0) == 1 && len(defs0[0].Params) == len(x.Args) {
+				if err := c.checkCallArgs(defs0[0], x.Args, sc, x.Pos); err != nil {
+					return nil, err
+				}
+			}
 			return nil, c.errf(id.Pos, "%s", overloadErrT(c.allDefs(id.Name), id.Name, len(x.Args)))
 		}
 		if err := c.checkCallArgs(fn, x.Args, sc, x.Pos); err != nil {

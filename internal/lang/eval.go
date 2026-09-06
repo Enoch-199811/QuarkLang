@@ -316,6 +316,7 @@ type ImplDef struct {
 type interp struct {
 	ctxHead     atomic.Pointer[execCtx]
 	fns         map[string]*Func
+	libObjs     map[string]*libObj // library 系统库绑定对象（懒加载句柄）
 	sigs        map[string]*signDef
 	builtins    map[string]builtinFn
 	structs     map[string]*StructDef
@@ -414,6 +415,16 @@ func runWithInterp(prog *Program, filename string, args []string, stdin io.Reade
 		}
 	}
 	in.registerIOBuiltins()
+	for _, lb := range prog.Libraries {
+		if in.libObjs == nil {
+			in.libObjs = map[string]*libObj{}
+		}
+		obj := &libObj{name: lb.Name, lib: lb.Lib, methods: map[string]*Func{}}
+		for _, fn := range lb.Methods {
+			obj.methods[fn.Name] = fn
+		}
+		in.libObjs[lb.Name] = obj
+	}
 
 	if prog.Kind == "library" {
 		return nil, fmt.Errorf("RunError: #error (\"cannot run a library\"): program library; 编译为库，不可运行")
@@ -768,6 +779,11 @@ func (in *interp) evalExpr(e Expr, sc *scope, ctx *execCtx) (Value, error) {
 		if x.Name == "false" {
 			return BoolV(false), nil
 		}
+		if in.libObjs != nil {
+			if lb, ok := in.libObjs[x.Name]; ok {
+				return LibraryV(lb), nil
+			}
+		}
 		if x.Name == "memory" || x.Name == "GlobalMemory" {
 			return MemoryV(globalMemory), nil
 		}
@@ -1104,6 +1120,9 @@ func (in *interp) evalArgs(args []Expr, sc *scope, ctx *execCtx) ([]Value, error
 }
 
 func (in *interp) callMethod(obj Value, name string, args []Value, ctx *execCtx, pos Pos) (Value, error) {
+	if obj.IsLib() {
+		return in.callLibMethod(obj.Lib(), name, args, pos, ctx)
+	}
 	if obj.IsList() {
 		o := obj.List()
 		switch name {

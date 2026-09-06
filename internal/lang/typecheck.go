@@ -33,6 +33,7 @@ const (
 	tCopyd
 	tNull
 	tTypeVar
+	tLib
 )
 
 type Type struct {
@@ -73,7 +74,7 @@ var kindName = map[tKind]string{
 	tNil: "nil", tAny: "interface{}", tFuncBuffer: "FuncBuffer",
 	tIOStream: "IOStream", tInputStream: "InputStream", tOutputStream: "OutputStream",
 	tChannel: "Channel", tTask: "Task", tMemorize: "memorize", tMemory: "memory",
-	tFunc: "fn", tStruct: "struct", tTaskm: "taskm", tPtr: "ptr", tCopyd: "Copyd", tNull: "null", tTypeVar: "typevar",
+	tFunc: "fn", tStruct: "struct", tTaskm: "taskm", tPtr: "ptr", tCopyd: "Copyd", tNull: "null", tTypeVar: "typevar", tLib: "library",
 }
 
 func (t *Type) String() string {
@@ -354,7 +355,8 @@ type checker struct {
 	structs    map[string]*StructDef
 	interfaces map[string]*InterfaceDef
 	impls      map[string]*ImplDef
-	aliases    map[string]string // type <类型> 名字; 类型别名
+	aliases    map[string]string       // type <类型> 名字; 类型别名
+	libs       map[string]*LibraryDecl // library 系统库绑定
 	curRet     *Type
 	curSubst   map[string]*Type // 泛型方法体/调用点的类型参数替换
 	typeVars   map[string]bool  // 泛型函数当前作用域的类型参数（fn<T,...>）
@@ -400,6 +402,15 @@ func Typecheck(prog *Program) error {
 			return &CheckError{Msg: fmt.Sprintf("CompileError: duplicate interface %q", i.Name), Pos: i.Pos}
 		}
 		c.interfaces[i.Name] = &InterfaceDef{Name: i.Name, Methods: i.Methods, Expands: i.Expands}
+	}
+	for _, lb := range prog.Libraries {
+		if c.libs == nil {
+			c.libs = map[string]*LibraryDecl{}
+		}
+		if _, dup := c.libs[lb.Name]; dup {
+			return &CheckError{Msg: fmt.Sprintf("CompileError: duplicate library %q", lb.Name), Pos: lb.Pos}
+		}
+		c.libs[lb.Name] = lb
 	}
 	for _, im := range prog.Impls {
 		// 泛型规则：struct 有泛型参数时 impl 必须引入同样的参数；struct 无参数时 impl 不许有
@@ -1033,6 +1044,11 @@ func (c *checker) infer(e Expr, sc *cScope) (*Type, error) {
 		}
 		return &Type{Kind: tStruct, FName: ".", Fields: fields}, nil
 	case *Ident:
+		if c.libs != nil {
+			if lb, ok := c.libs[x.Name]; ok {
+				return &Type{Kind: tLib, FName: lb.Name}, nil // 系统库对象（library X 绑定）
+			}
+		}
 		if x.Name == "true" || x.Name == "false" {
 			return tBoolV, nil
 		}
@@ -1256,6 +1272,40 @@ func (c *checker) checkArity(name string, want, got int, pos Pos) error {
 // methodType 检查方法调用（接收者类型 + 参数个数 + 参数类型）。
 func (c *checker) methodType(recv *Type, name string, args []*Type, pos Pos) (*Type, error) {
 	switch recv.Kind {
+	case tLib:
+		if c.libs == nil {
+			return nil, c.errf(pos, "TypeError: 未知系统库 %q", recv.FName)
+		}
+		lb := c.libs[recv.FName]
+		for _, fn := range lb.Methods {
+			if fn.Name == name {
+				if len(args) != len(fn.Params) {
+					return nil, c.errf(pos, "LibraryError: %s.%s 需要 %d 个参数，给了 %d", recv.FName, name, len(fn.Params), len(args))
+				}
+				for i, p := range fn.Params {
+					want := tFloatV
+					if p.Type != "f32" {
+						rt, err := c.resolveType(p.Type, pos)
+						if err != nil {
+							return nil, err
+						}
+						want = rt
+					}
+					if !assignable(args[i], want) {
+						return nil, c.errf(pos, "TypeError: %s.%s 参数 %s 需要 %s，给了 %s", recv.FName, name, p.Name, want, args[i])
+					}
+				}
+				if fn.Ret == "" || fn.Ret == "void" {
+					return tNilV, nil
+				}
+				ret := fn.Ret
+				if ret == "f32" {
+					return tFloatV, nil
+				}
+				return c.resolveType(ret, pos)
+			}
+		}
+		return nil, c.errf(pos, "LibraryError: 库 %s 没有导出函数 %q", recv.FName, name)
 	case tString:
 		switch name {
 		case "size", "indexOf", "toInt":

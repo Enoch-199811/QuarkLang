@@ -332,6 +332,67 @@ func (p *parser) parseProgram() (*Program, error) {
 					}
 					prog.Impls = append(prog.Impls, im)
 					continue
+				case "library":
+					// library 系统库绑定：library <Ident 或 "字符串"> { fn 签名; ... }; / library X;
+					libPos := Pos{Line: p.cur().Line, Col: p.cur().Col}
+					p.advance()
+					var libName string
+					switch p.cur().Kind {
+					case TStr:
+						libName = p.cur().Text
+						p.advance()
+					default:
+						n, err := p.expectIdent("library name")
+						if err != nil {
+							return nil, err
+						}
+						libName = n.Text
+					}
+					ld := &LibraryDecl{Name: libName, Lib: libName, Pos: libPos}
+					if p.curIs(TLBrace) {
+						p.advance()
+						for !p.curIs(TRBrace) {
+							if p.curIs(TEOF) {
+								return nil, p.errf(p.cur(), "unterminated library body")
+							}
+							if !p.curIs(TFunc) {
+								return nil, p.errf(p.cur(), "library 体内只能有 fn 符号签名")
+							}
+							kw := p.advance()
+							name, err := p.expectIdent("function symbol name")
+							if err != nil {
+								return nil, err
+							}
+							if _, err := p.expect(TLParen, "'('"); err != nil {
+								return nil, err
+							}
+							params, err := p.parseParamList()
+							if err != nil {
+								return nil, err
+							}
+							ret := "void"
+							if p.curIs(TIdent) || p.curIs(TInterface) {
+								ret, err = p.parseType()
+								if err != nil {
+									return nil, err
+								}
+							}
+							if _, err := p.expect(TSemi, "';'"); err != nil {
+								return nil, err
+							}
+							ld.Methods = append(ld.Methods, &Func{Name: name.Text, Params: params, Ret: ret, Pos: Pos{Line: kw.Line, Col: kw.Col}})
+						}
+						p.advance() // '}'
+						if p.curIs(TSemi) {
+							p.advance() // ';' 可选
+						}
+					} else {
+						if _, err := p.expect(TSemi, "';'"); err != nil {
+							return nil, err
+						}
+					}
+					prog.Libraries = append(prog.Libraries, ld)
+					continue
 				case "program":
 					// 预制宏：program main; / program library;
 					p.advance()

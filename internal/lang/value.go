@@ -43,6 +43,7 @@ const (
 	vCopyd
 	vChan
 	vStruct
+	vLib
 )
 
 // ---- 标量构造器（保持旧名，调用点无需改） ----
@@ -80,6 +81,7 @@ func FuncV(f *FuncValue) Value          { return Value{tag: byte(vFunc), ptr: un
 func CopydV(c *CopydValue) Value        { return Value{tag: byte(vCopyd), ptr: unsafe.Pointer(c)} }
 func ChanV(c *Channel) Value            { return Value{tag: byte(vChan), ptr: unsafe.Pointer(c)} }
 func StructV(st *StructValue) Value     { return Value{tag: byte(vStruct), ptr: unsafe.Pointer(st)} }
+func LibraryV(o *libObj) Value          { return Value{tag: byte(vLib), ptr: unsafe.Pointer(o)} }
 
 // ---- 类型判定 ----
 
@@ -102,6 +104,7 @@ func (v Value) IsFunc() bool     { return v.tag == byte(vFunc) }
 func (v Value) IsCopyd() bool    { return v.tag == byte(vCopyd) }
 func (v Value) IsChan() bool     { return v.tag == byte(vChan) }
 func (v Value) IsStruct() bool   { return v.tag == byte(vStruct) }
+func (v Value) IsLib() bool      { return v.tag == byte(vLib) }
 
 // ---- 取值（调用方保证类型匹配；不匹配返回零值/空，语义由测试兜底） ----
 
@@ -123,6 +126,7 @@ func (v Value) Func() *FuncValue          { return (*FuncValue)(v.ptr) }
 func (v Value) Copyd() *CopydValue        { return (*CopydValue)(v.ptr) }
 func (v Value) Chan() *Channel            { return (*Channel)(v.ptr) }
 func (v Value) Struct() *StructValue      { return (*StructValue)(v.ptr) }
+func (v Value) Lib() *libObj              { return (*libObj)(v.ptr) }
 
 // TypeName 返回值的运行时类型名。
 func (v Value) TypeName() string {
@@ -213,6 +217,8 @@ func (v Value) String() string {
 		return "<Channel>"
 	case vStruct:
 		return v.Struct().String()
+	case vLib:
+		return "<library " + v.Lib().name + ">"
 	}
 	return "<unknown>"
 }

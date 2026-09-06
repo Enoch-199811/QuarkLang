@@ -18,6 +18,7 @@ type Program struct {
 	FnIndex     map[string]int
 	Funcs       []*FuncDecl
 	Structs     []*StructDecl
+	Libraries   []*LibraryDecl
 	Interfaces  []*InterfaceDecl
 	Impls       []*ImplDecl
 	TypeAliases []*TypeAlias
@@ -39,6 +40,18 @@ type MacroDef struct {
 // FuncDecl is a top-level function declaration. Ret is the optional return
 // type annotation: functions WITHOUT Ret yield a FuncBuffer (out -> tail),
 // functions WITH Ret yield the value of `return expr;` directly.
+// LibraryDecl 是系统库绑定声明：
+//
+//	library gl3 { fn ClearColor(x f32, y f32, z f32, w f32) void; ... }
+//
+// 本质：gl3 ... = library("gl3")——库对象；体内 fn 为导出符号签名（ABI 声明）。
+type LibraryDecl struct {
+	Name    string
+	Lib     string // 系统库名（dlopen 用："libGL.so.1" / "opengl32"）
+	Methods []*Func
+	Pos     Pos
+}
+
 type FuncDecl struct {
 	Name       string
 	TypeParams []string // 泛型函数 func<T, ...>（xmind §函数）

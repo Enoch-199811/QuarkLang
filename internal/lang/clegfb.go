@@ -69,6 +69,33 @@ func (fb *framebuffer) fillRect(x, y, w, h int, c uint32) {
 	}
 }
 
+// fillRoundRect 圆角矩形（radius >= 0；角部圆切剔除）。
+func (fb *framebuffer) fillRoundRect(x, y, w, h, radius int, c uint32) {
+	if radius <= 0 {
+		fb.fillRect(x, y, w, h, c)
+		return
+	}
+	fb.fillRect(x+radius, y, w-2*radius, h, c)
+	fb.fillRect(x, y+radius, radius, h-2*radius, c)
+	fb.fillRect(x+w-radius, y+radius, radius, h-2*radius, c)
+	for r := 0; r < radius; r++ {
+		// 四角弧带：逐行宽度 = sqrt(radius^2 - (radius-r)^2)
+		d := radius - r
+		span := int(float64(radius) * 0.9 * sqrtf(float64(radius*radius-d*d)/float64(radius*radius)))
+		_ = span
+		// 简化：行宽 = sqrt(r^2 - d^2)（圆切）
+		import2 := float64(radius*radius - d*d)
+		if import2 < 0 {
+			import2 = 0
+		}
+		span = int(sqrtf(import2))
+		fb.fillRect(x+radius-span, y+r, span, 1, c)
+		fb.fillRect(x+w-radius, y+r, span, 1, c)
+		fb.fillRect(x+radius-span, y+h-1-r, span, 1, c)
+		fb.fillRect(x+w-radius, y+h-1-r, span, 1, c)
+	}
+}
+
 // drawGlyph 画 5x7 字形（scale 缩放；颜色直写）。
 func (fb *framebuffer) drawGlyph(x, y int, glyph uint8, scale int, c uint32) {
 	if glyph < 32 || glyph > 126 {
@@ -160,3 +187,15 @@ func rgb(r, g, b byte) uint32 {
 }
 
 var _ = fmt.Sprintf
+
+// sqrtf 平方根（避免 import math 的 float64 开销——用 math 包即可，此处取整数学）。
+func sqrtf(v float64) float64 {
+	if v <= 0 {
+		return 0
+	}
+	x := v
+	for i := 0; i < 12; i++ {
+		x = (x + v/x) / 2
+	}
+	return x
+}

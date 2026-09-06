@@ -2597,6 +2597,17 @@ func (in *interp) registerIOBuiltins() {
 			rgb(byte(args[3].Int()), byte(args[4].Int()), byte(args[5].Int())), args[7].Str())
 		return NilV(), nil
 	}
+	in.builtins["qkcleg_roundrect"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+		if len(args) != 8 {
+			return NilV(), &RunError{Msg: "TypeError: qkcleg_roundrect(x,y,w,h,radius,r,g,b)", Pos: pos, Ctx: ctx}
+		}
+		if in.fb == nil {
+			return NilV(), &RunError{Msg: "TypeError: 先 qkcleg_create", Pos: pos, Ctx: ctx}
+		}
+		in.fb.fillRoundRect(int(args[0].Int()), int(args[1].Int()), int(args[2].Int()), int(args[3].Int()), int(args[4].Int()),
+			rgb(byte(args[5].Int()), byte(args[6].Int()), byte(args[7].Int())))
+		return NilV(), nil
+	}
 	in.builtins["qkcleg_text"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
 		if len(args) != 7 || !args[6].IsStr() {
 			return NilV(), &RunError{Msg: "TypeError: qkcleg_text(x,y,size,r,g,b,String)", Pos: pos, Ctx: ctx}

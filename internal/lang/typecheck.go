@@ -806,7 +806,7 @@ func (c *checker) substType(s string, subst map[string]*Type, pos Pos) (*Type, e
 // isBuiltinFuncName 判断是否为内置函数（可作为函数引用传递）。
 func isBuiltinFuncName(s string) bool {
 	switch s {
-	case "rand", "sum", "FileInputStream", "FileOutputStream", "ifstream", "ofstream", "iofstream", "ConsoleInputStream", "ConsoleOutputStream", "qkexec", "qkexecv", "qkpopen", "qkhttp_get", "qkhttp_post", "qkjson_dumps", "qkjson_loads", "qkfile_read", "qkfile_write", "qkcleg_style_load", "qkcleg_style_parse", "qkcleg_create", "qkscreen_open", "qkscreen_present", "qkscreen_close", "qkcleg_clear", "qkcleg_rect", "qkcleg_text", "qkcleg_text_ex", "qkcleg_frame":
+	case "rand", "sum", "FileInputStream", "FileOutputStream", "ifstream", "ofstream", "iofstream", "ConsoleInputStream", "ConsoleOutputStream", "qkexec", "qkexecv", "qkpopen", "qkhttp_get", "qkhttp_post", "qkjson_dumps", "qkjson_loads", "qkfile_read", "qkfile_write", "qkcleg_style_load", "qkcleg_style_parse", "qkcleg_create", "qkscreen_open", "qkscreen_present", "qkscreen_close", "qkcleg_clear", "qkcleg_rect", "qkcleg_roundrect", "qkcleg_text", "qkcleg_text_ex", "qkcleg_frame":
 		return true
 	}
 	return false
@@ -2165,9 +2165,9 @@ func (c *checker) inferCall(x *CallExpr, sc *cScope) (*Type, error) {
 			return nil, c.errf(id.Pos, "TypeError: qkcleg_frame(path String)")
 		}
 		return tNilV, nil
-	case "qkcleg_rect", "qkcleg_text", "qkcleg_text_ex":
+	case "qkcleg_rect", "qkcleg_roundrect", "qkcleg_text", "qkcleg_text_ex":
 		want := 7
-		if id.Name == "qkcleg_text_ex" {
+		if id.Name == "qkcleg_roundrect" || id.Name == "qkcleg_text_ex" {
 			want = 8
 		}
 		if err := c.checkArity(id.Name, want, len(args), id.Pos); err != nil {

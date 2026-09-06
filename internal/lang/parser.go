@@ -1019,6 +1019,15 @@ func (p *parser) parseStmt() (Stmt, error) {
 		st := &IfStmt{Cond: cond, Then: thenB}
 		if p.curIs(TElse) {
 			p.advance()
+			if p.curIs(TIf) {
+				// else if 链：嵌套 if 包装为 else 块（语义一致）
+				nested, err := p.parseStmt()
+				if err != nil {
+					return nil, err
+				}
+				st.Else = &Block{Stmts: []Stmt{nested}}
+				return st, nil
+			}
 			elseB, err := p.parseBlock()
 			if err != nil {
 				return nil, err

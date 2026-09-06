@@ -1383,6 +1383,13 @@ func (in *interp) callMethod(obj Value, name string, args []Value, ctx *execCtx,
 			}
 			return NilV(), nil
 		}
+	} else if obj.IsInt() || obj.IsFloat() || obj.IsBool() {
+		if name == "toString" {
+			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
+				return NilV(), err
+			}
+			return StrV(obj.String()), nil
+		}
 	} else if obj.IsStr() {
 		o := obj.Str()
 		switch name {

@@ -1489,6 +1489,14 @@ func (c *checker) methodType(recv *Type, name string, args []*Type, pos Pos) (*T
 			}
 		}
 		return nil, c.errf(pos, "LibraryError: 库 %s 没有导出函数 %q", recv.FName, name)
+	case tInt, tFloat, tBool:
+		if name == "toString" {
+			if err := c.checkArity(name, 0, len(args), pos); err != nil {
+				return nil, err
+			}
+			return tStringV, nil
+		}
+		return nil, c.errf(pos, "TypeError: no method %q", name)
 	case tString:
 		switch name {
 		case "size", "indexOf", "toInt":

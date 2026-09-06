@@ -71,7 +71,7 @@ cd compiler && go build -o qkc .
 
 | 项目 | 说明 | 仓库 |
 |---|---|---|
-| QuarkLangLibs-Actions | 官方认证的 `actions` 库：进程执行 API（`exec` / `execv` / `popen`，包装运行时原语 qkexec/qkexecv/qkpopen，含 shell 注入说明与 8 MiB 输出上限） | https://github.com/Enoch-199811/QuarkLangLibs-Actions |
+| QuarkLangLibs-Actions | 官方认证的 `actions` 库（两级）：`space` 系统级函数（`system`/`network` 空间，`exec`/`execv`/`popen`/`get`/`post`）+ `Command`/`Network` 类实现 `Executor` 接口（`self Self`，`.exec()`）；含 shell 注入说明与 8 MiB/10s 上限 | https://github.com/Enoch-199811/QuarkLangLibs-Actions |
 
 使用：把 `actions.qk` 放在与源码同目录，`import "actions";` 后调用 `exec(...)` / `execv(...)` / `popen(...)`。
 

@@ -20,13 +20,11 @@ const (
 	TStruct
 	TImpl
 	TInterface
-	TOut
 	TReturn
 	TIf
 	TElse
 	TWhile
 	TFor
-	TIn
 	TTrue
 	TFalse
 	TLParen
@@ -109,13 +107,11 @@ var keywords = map[string]TokenKind{
 	"struct":    TStruct,
 	"impl":      TImpl,
 	"interface": TInterface,
-	"out":       TOut,
 	"return":    TReturn,
 	"if":        TIf,
 	"else":      TElse,
 	"while":     TWhile,
 	"for":       TFor,
-	"in":        TIn,
 	"true":      TTrue,
 	"false":     TFalse,
 	"log":       TLog,

@@ -874,8 +874,6 @@ func (p *parser) parseStmt() (Stmt, error) {
 		return &DeleteStmt{X: x, Pos: Pos{Line: kw.Line, Col: kw.Col}}, nil
 	}
 	switch p.cur().Kind {
-	case TOut:
-		return nil, p.errf(p.cur(), "out 已在新模型中移除：请用 return expr; 返回结果")
 	case TTry:
 		kw := p.advance()
 		tryB, err := p.parseBlock()

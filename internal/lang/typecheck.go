@@ -461,6 +461,7 @@ func opMethodFor(op string) string {
 func builtinOperationIfaces() map[string]*InterfaceDef {
 	self2 := []Param{{Name: "self", Type: "Self"}, {Name: "o", Type: "Self"}}
 	self1 := []Param{{Name: "self", Type: "Self"}}
+	self := self1
 	fn := func(n string, p []Param, ret string) MethodSig {
 		return MethodSig{Name: n, Params: p, Ret: ret, Dynamic: true}
 	}
@@ -478,6 +479,16 @@ func builtinOperationIfaces() map[string]*InterfaceDef {
 		"GtOperation":  {Name: "GtOperation", Methods: []MethodSig{fn("gt", self2, "bool")}},
 		"GeOperation":  {Name: "GeOperation", Methods: []MethodSig{fn("ge", self2, "bool")}},
 		"Operation":    {Name: "Operation", Expands: []string{"AddOperation", "SubOperation", "MulOperation", "DivOperation", "ModOperation", "NegOperation", "EqOperation", "NeOperation", "LtOperation", "LeOperation", "GtOperation", "GeOperation"}},
+		// ---- 事件接口族（组件协议：用户用类直接 impl；qksignal_emit 派发） ----
+		"ClegClickable":  {Name: "ClegClickable", Methods: []MethodSig{fn("onClicked", self, "void"), fn("onPressed", self, "void"), fn("onReleased", self, "void")}},
+		"ClegCheckable":  {Name: "ClegCheckable", Methods: []MethodSig{fn("onToggled", []Param{{Name: "self", Type: "Self"}, {Name: "checked", Type: "bool"}}, "void")}},
+		"ClegEditable":   {Name: "ClegEditable", Methods: []MethodSig{fn("onTextChanged", []Param{{Name: "self", Type: "Self"}, {Name: "newText", Type: "String"}}, "void"), fn("onReturnPressed", self, "void")}},
+		"ClegValueable":  {Name: "ClegValueable", Methods: []MethodSig{fn("onValueChanged", []Param{{Name: "self", Type: "Self"}, {Name: "value", Type: "int"}}, "void")}},
+		"ClegSelectable": {Name: "ClegSelectable", Methods: []MethodSig{fn("onCurrentIndexChanged", []Param{{Name: "self", Type: "Self"}, {Name: "index", Type: "int"}}, "void")}},
+		"ClegItemable":   {Name: "ClegItemable", Methods: []MethodSig{fn("onItemClicked", []Param{{Name: "self", Type: "Self"}, {Name: "index", Type: "int"}}, "void")}},
+		"ClegCellable":   {Name: "ClegCellable", Methods: []MethodSig{fn("onCellClicked", []Param{{Name: "self", Type: "Self"}, {Name: "row", Type: "int"}, {Name: "col", Type: "int"}}, "void")}},
+		"ClegCloseable":  {Name: "ClegCloseable", Methods: []MethodSig{fn("onCloseRequested", self, "void")}},
+		"ClegActionable": {Name: "ClegActionable", Methods: []MethodSig{fn("onTriggered", self, "void")}},
 	}
 }
 
@@ -2151,8 +2162,8 @@ func (c *checker) inferCall(x *CallExpr, sc *cScope) (*Type, error) {
 		}
 		return tNilV, nil
 	case "qksignal_emit":
-		if err := c.checkArity(id.Name, 2, len(args), id.Pos); err != nil {
-			return nil, err
+		if len(args) < 2 {
+			return nil, c.errf(id.Pos, "CompileError: qksignal_emit(node, name String [, args...])")
 		}
 		return tNilV, nil
 	case "qkstyle_get":

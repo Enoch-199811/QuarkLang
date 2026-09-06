@@ -2567,12 +2567,13 @@ func (in *interp) registerIOBuiltins() {
 	}
 	// [cleg 信号] qksignal_emit(node, name)：节点实现 onClicked 等方法则调用
 	in.builtins["qksignal_emit"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
-		if len(args) != 2 || !args[0].IsStruct() || !args[1].IsStr() {
-			return NilV(), &RunError{Msg: "TypeError: qksignal_emit(node, name String)", Pos: pos, Ctx: ctx}
+		if len(args) < 2 || !args[0].IsStruct() || !args[1].IsStr() {
+			return NilV(), &RunError{Msg: "TypeError: qksignal_emit(node, name String [, args...])", Pos: pos, Ctx: ctx}
 		}
 		node := args[0]
 		if fn := in.selfMethodOf(node.Struct().SType, args[1].Str()); fn != nil {
-			return in.callFunc(fn, []Value{node}, pos, ctx.depth)
+			callArgs := append([]Value{node}, args[2:]...)
+			return in.callFunc(fn, callArgs, pos, ctx.depth)
 		}
 		return NilV(), nil
 	}

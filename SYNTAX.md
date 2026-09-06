@@ -36,6 +36,7 @@
 | E4 | `.{a: 1, b: 2}` | 匿名结构字面量（字段名可为关键字 `in`/`out`） |
 | E5 | `new int[10]` | 堆分配（block 管理）；`l pointer List<int> = new int[10];` |
 | E6 | `l[i]` `*l` `l.size()` | 下标；List 取头；List 方法 size/head/tail/next/reset/append/appendAll/toString/__sort__ |
+| E6b | `s.size()` 等 **String 内置文本方法** | size/contains/startsWith/endsWith/indexOf(-1=无)/substring(start,end?)/split(sep)→List<String>/trim/trimLeft/trimRight/toLower/toUpper/replace(old,new)/charAt(i)/toInt/toFloat；越界报 StringIndexOutOfBoundsError |
 | E7 | `+ - * / %` `<< >>` `== != < <= > >=` `&& || !` | 算术/位移/比较/逻辑；`+` 支持 String 拼接 |
 | E8 | `f(x)` `obj.m(x)` `Type::new()` `p.x` | 调用/方法/静态/成员读取 |
 | E9 | `expensive(41) @mb();` | **签名调用**：`@` 后缀任意 Sign 实例（mb 是 memorize 实例） |

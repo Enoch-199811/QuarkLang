@@ -1252,6 +1252,73 @@ func (c *checker) checkArity(name string, want, got int, pos Pos) error {
 // methodType 检查方法调用（接收者类型 + 参数个数 + 参数类型）。
 func (c *checker) methodType(recv *Type, name string, args []*Type, pos Pos) (*Type, error) {
 	switch recv.Kind {
+	case tString:
+		switch name {
+		case "size", "indexOf", "toInt":
+			if err := c.checkArity(name, 0, len(args), pos); err != nil && name != "indexOf" {
+				return nil, err
+			}
+			if name == "indexOf" {
+				if err := c.checkArity(name, 1, len(args), pos); err != nil {
+					return nil, err
+				}
+				if args[0].Kind != tString {
+					return nil, c.errf(pos, "TypeError: indexOf 需要 String 参数")
+				}
+			}
+			if name == "toInt" {
+				return tIntV, nil
+			}
+			return tIntV, nil
+		case "contains", "startsWith", "endsWith":
+			if err := c.checkArity(name, 1, len(args), pos); err != nil {
+				return nil, err
+			}
+			if args[0].Kind != tString {
+				return nil, c.errf(pos, "TypeError: %s 需要 String 参数", name)
+			}
+			return tBoolV, nil
+		case "substring":
+			if len(args) < 1 || len(args) > 2 {
+				return nil, c.errf(pos, "TypeError: substring(start, end?) 需要 1-2 个 int 参数")
+			}
+			for _, a := range args {
+				if a.Kind != tInt {
+					return nil, c.errf(pos, "TypeError: substring 参数必须是 int")
+				}
+			}
+			return tStringV, nil
+		case "split":
+			if err := c.checkArity(name, 1, len(args), pos); err != nil {
+				return nil, err
+			}
+			if args[0].Kind != tString {
+				return nil, c.errf(pos, "TypeError: split 需要 String 分隔符")
+			}
+			return c.resolveType("List<String>", pos)
+		case "trim", "trimLeft", "trimRight", "toLower", "toUpper", "charAt", "toFloat":
+			if name == "charAt" {
+				if err := c.checkArity(name, 1, len(args), pos); err != nil {
+					return nil, err
+				}
+				if args[0].Kind != tInt {
+					return nil, c.errf(pos, "TypeError: charAt 需要 int 索引")
+				}
+			} else if err := c.checkArity(name, 0, len(args), pos); err != nil {
+				return nil, err
+			}
+			return tStringV, nil
+		case "replace":
+			if err := c.checkArity(name, 2, len(args), pos); err != nil {
+				return nil, err
+			}
+			for _, a := range args {
+				if a.Kind != tString {
+					return nil, c.errf(pos, "TypeError: replace(old, new) 需要 String 参数")
+				}
+			}
+			return tStringV, nil
+		}
 	case tList:
 		switch name {
 		case "head", "tail", "size":

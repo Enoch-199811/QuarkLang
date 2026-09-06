@@ -752,3 +752,40 @@ program main;`)
 		t.Fatalf("got %q", out)
 	}
 }
+
+// String 文本处理内置方法集
+func TestStringMethods(t *testing.T) {
+	out, err := runSrc(t, `fn main(io IOStream) {
+    s String = "  Hello, QuarkLang World  ";
+    io.println(s.trim().size());
+    io.println(s.trim().toLower());
+    io.println(s.trim().startsWith("Hello"));
+    io.println(s.trim().endsWith("World"));
+    io.println(s.trim().indexOf("Quark"));
+    io.println(s.trim().substring(7, 14));
+    parts List<String> = "a,b,c".split(",");
+    io.println(parts.size());
+    io.println("hello".replace("l", "L"));
+    io.println("42".toInt());
+    io.println("3.5".toFloat());
+    io.println("字".charAt(0));
+    io.println("x".contains(""));
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "22\nhello, quarklang world\ntrue\ntrue\n7\nQuarkLa\n3\nheLLo\n42\n3.5\n字\ntrue\n"
+	if out != want {
+		t.Fatalf("got %q want %q", out, want)
+	}
+}
+
+// String 越界访问报错
+func TestStringBoundsError(t *testing.T) {
+	_, err := runSrc(t, `fn main(io IOStream) {
+    io.println("abc".charAt(5));
+}`)
+	if err == nil || !strings.Contains(err.Error(), "StringIndexOutOfBoundsError") {
+		t.Fatalf("got %v", err)
+	}
+}

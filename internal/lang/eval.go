@@ -10,10 +10,12 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 // RunError is a runtime (or strict-check) error with source position and,
@@ -1316,6 +1318,142 @@ func (in *interp) callMethod(obj Value, name string, args []Value, ctx *execCtx,
 				return NilV(), &RunError{Msg: "TypeError: thread.talk 需要 channel 类实例", Pos: pos, Ctx: ctx}
 			}
 			return NilV(), nil
+		}
+	} else if obj.IsStr() {
+		o := obj.Str()
+		switch name {
+		case "size":
+			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
+				return NilV(), err
+			}
+			return IntV(int64(utf8.RuneCountInString(o))), nil
+		case "contains":
+			if err := wantArity(name, 1, len(args), pos, ctx); err != nil {
+				return NilV(), err
+			}
+			if !args[0].IsStr() {
+				return NilV(), &RunError{Msg: "TypeError: contains 需要 String 参数", Pos: pos, Ctx: ctx}
+			}
+			return BoolV(strings.Contains(o, args[0].Str())), nil
+		case "startsWith":
+			if err := wantArity(name, 1, len(args), pos, ctx); err != nil {
+				return NilV(), err
+			}
+			if !args[0].IsStr() {
+				return NilV(), &RunError{Msg: "TypeError: startsWith 需要 String 参数", Pos: pos, Ctx: ctx}
+			}
+			return BoolV(strings.HasPrefix(o, args[0].Str())), nil
+		case "endsWith":
+			if err := wantArity(name, 1, len(args), pos, ctx); err != nil {
+				return NilV(), err
+			}
+			if !args[0].IsStr() {
+				return NilV(), &RunError{Msg: "TypeError: endsWith 需要 String 参数", Pos: pos, Ctx: ctx}
+			}
+			return BoolV(strings.HasSuffix(o, args[0].Str())), nil
+		case "indexOf":
+			if err := wantArity(name, 1, len(args), pos, ctx); err != nil {
+				return NilV(), err
+			}
+			if !args[0].IsStr() {
+				return NilV(), &RunError{Msg: "TypeError: indexOf 需要 String 参数", Pos: pos, Ctx: ctx}
+			}
+			return IntV(int64(strings.Index(o, args[0].Str()))), nil // -1 = 不存在
+		case "substring":
+			if len(args) < 1 || len(args) > 2 || !args[0].IsInt() {
+				return NilV(), &RunError{Msg: "TypeError: substring(start, end?) 需要 int 参数", Pos: pos, Ctx: ctx}
+			}
+			runes := []rune(o)
+			n := int64(len(runes))
+			start := args[0].Int()
+			end := n
+			if len(args) == 2 {
+				if !args[1].IsInt() {
+					return NilV(), &RunError{Msg: "TypeError: substring 的 end 必须是 int", Pos: pos, Ctx: ctx}
+				}
+				end = args[1].Int()
+			}
+			if start < 0 || end < start || end > n {
+				return NilV(), &RunError{Msg: fmt.Sprintf("StringIndexOutOfBoundsError: substring(%d, %d) 越界 [0,%d]", start, end, n), Pos: pos, Ctx: ctx}
+			}
+			return StrV(string(runes[start:end])), nil
+		case "split":
+			if err := wantArity(name, 1, len(args), pos, ctx); err != nil {
+				return NilV(), err
+			}
+			if !args[0].IsStr() {
+				return NilV(), &RunError{Msg: "TypeError: split 需要 String 分隔符", Pos: pos, Ctx: ctx}
+			}
+			parts := strings.Split(o, args[0].Str())
+			lst := NewList()
+			for _, p := range parts {
+				lst.Append(StrV(p))
+			}
+			return ListV(lst), nil
+		case "trim":
+			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
+				return NilV(), err
+			}
+			return StrV(strings.TrimSpace(o)), nil
+		case "trimLeft":
+			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
+				return NilV(), err
+			}
+			return StrV(strings.TrimLeft(o, " \t\r\n")), nil
+		case "trimRight":
+			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
+				return NilV(), err
+			}
+			return StrV(strings.TrimRight(o, " \t\r\n")), nil
+		case "toLower":
+			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
+				return NilV(), err
+			}
+			return StrV(strings.ToLower(o)), nil
+		case "toUpper":
+			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
+				return NilV(), err
+			}
+			return StrV(strings.ToUpper(o)), nil
+		case "replace":
+			if err := wantArity(name, 2, len(args), pos, ctx); err != nil {
+				return NilV(), err
+			}
+			if !args[0].IsStr() || !args[1].IsStr() {
+				return NilV(), &RunError{Msg: "TypeError: replace(old, new) 需要 String 参数", Pos: pos, Ctx: ctx}
+			}
+			return StrV(strings.ReplaceAll(o, args[0].Str(), args[1].Str())), nil
+		case "charAt":
+			if err := wantArity(name, 1, len(args), pos, ctx); err != nil {
+				return NilV(), err
+			}
+			if !args[0].IsInt() {
+				return NilV(), &RunError{Msg: "TypeError: charAt 需要 int 索引", Pos: pos, Ctx: ctx}
+			}
+			runes := []rune(o)
+			i := args[0].Int()
+			if i < 0 || i >= int64(len(runes)) {
+				return NilV(), &RunError{Msg: fmt.Sprintf("StringIndexOutOfBoundsError: charAt(%d) 越界 [0,%d]", i, len(runes)), Pos: pos, Ctx: ctx}
+			}
+			return StrV(string(runes[i])), nil
+		case "toInt":
+			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
+				return NilV(), err
+			}
+			v, err := strconv.ParseInt(strings.TrimSpace(o), 10, 32)
+			if err != nil {
+				return NilV(), &RunError{Msg: fmt.Sprintf("ParseError: %q 不是合法整数", o), Pos: pos, Ctx: ctx}
+			}
+			return IntV(v), nil
+		case "toFloat":
+			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
+				return NilV(), err
+			}
+			v, err := strconv.ParseFloat(strings.TrimSpace(o), 64)
+			if err != nil {
+				return NilV(), &RunError{Msg: fmt.Sprintf("ParseError: %q 不是合法浮点数", o), Pos: pos, Ctx: ctx}
+			}
+			return FloatV(v), nil
 		}
 	} else if obj.IsMemorize() {
 		o := obj.Memorize()

@@ -37,6 +37,7 @@ type scope struct {
 	vars       map[string]Value
 	slots      []Value // 参数槽位（前 len(paramNames) 个为参数，线性访问免哈希）
 	paramNames []string
+	nParams    int // 参数个数：paramNames 中前 nParams 个是参数（declare 不覆盖），其后为局部变量
 	outer      *scope
 }
 
@@ -48,6 +49,7 @@ func newScope(outer *scope) *scope {
 // setParams 绑定函数参数到线性槽位（参数通常少，线性扫描比 map 哈希快）。
 func (s *scope) setParams(names []string, args []Value) {
 	s.paramNames = names
+	s.nParams = len(names)
 	s.slots = args
 }
 
@@ -62,8 +64,13 @@ func (s *scope) paramIndex(name string) int {
 }
 
 func (s *scope) declare(name string, v Value, pos Pos) error {
-	// 参数槽位已存在（execute 绑定），局部变量优先入线性槽位（免 map 哈希）
-	if s.paramIndex(name) >= 0 {
+	// 参数槽位已存在（execute 绑定）→ 保留绑定值；若是局部变量重复声明（循环内每轮重新声明）
+	// → 更新槽位（否则旧值永久残留，如循环中 p int = html.indexOf(...) 拿到首轮旧下标）
+	if i := s.paramIndex(name); i >= 0 {
+		if i < s.nParams {
+			return nil
+		}
+		s.slots[i] = v
 		return nil
 	}
 	for _, n := range s.paramNames {

@@ -789,3 +789,24 @@ func TestStringBoundsError(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+// 循环内变量重复声明必须更新槽位（曾致 indexOf 旧值残留→substring 越界）
+func TestLoopRedeclareUpdatesSlot(t *testing.T) {
+	out, err := runSrc(t, `fn main(io IOStream) {
+    html String = "AAA/xxxxB/yyyyyC/zzzzzz";
+    i int = 0;
+    while (i < 3) {
+        p int = html.indexOf("/");
+        io.println(p);
+        html = html.substring(p + 1);
+        i = i + 1;
+    }
+    io.println(html);
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "3\n5\n6\nzzzzzz\n" {
+		t.Fatalf("got %q", out)
+	}
+}

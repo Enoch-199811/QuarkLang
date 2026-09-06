@@ -1045,10 +1045,25 @@ func (in *interp) evalCall(c *CallExpr, sc *scope, ctx *execCtx) (Value, error) 
 		if err != nil {
 			return NilV(), err
 		}
-		if !fv.IsStr() {
-			return NilV(), &RunError{Msg: "TypeError: @styleConfigure(file String)", Pos: c.Pos, Ctx: ctx}
+		path := ""
+		if fv.IsFile() {
+			path = fv.File().Path
+		} else if fv.IsStr() {
+			path = fv.Str()
+		} else {
+			return NilV(), &RunError{Msg: "TypeError: @styleConfigure(file) 需要 file 或 String", Pos: c.Pos, Ctx: ctx}
 		}
-		raw, err := os.ReadFile(fv.Str())
+		// @styleConfigure 是给 setStyle 用的：读 file → 文件内容字符串 → 投递给 setStyle(string)
+		if mem, ok := c.Fn.(*MemberExpr); ok && mem.Name == "setStyle" && len(c.Args) >= 1 {
+			content, rerr := os.ReadFile(path)
+			if rerr == nil {
+				c.Args[0] = &StrLit{V: string(content), Pos: c.Pos}
+			}
+			clean := *c
+			clean.Sign = nil
+			return in.evalExpr(&clean, sc, ctx)
+		}
+		raw, err := os.ReadFile(path)
 		if err != nil {
 			return NilV(), &RunError{Msg: "IOError: " + err.Error(), Pos: c.Pos, Ctx: ctx}
 		}
@@ -2486,6 +2501,27 @@ func (in *interp) registerIOBuiltins() {
 		}
 		if err := os.WriteFile(args[0].Str(), []byte(args[1].Str()), 0o644); err != nil {
 			return NilV(), &RunError{Msg: fmt.Sprintf("IOError: %v", err), Pos: pos, Ctx: ctx}
+		}
+		return NilV(), nil
+	}
+	// [cleg style 解析] qkcleg_style_parse(styleTable, jsonText)：JSON 字符串 → HashTable → merge 进 style
+	in.builtins["qkcleg_style_parse"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+		if len(args) != 2 || !args[0].IsTable() || !args[1].IsStr() {
+			return NilV(), &RunError{Msg: "TypeError: qkcleg_style_parse(style HashTable, jsonText String)", Pos: pos, Ctx: ctx}
+		}
+		var raw interface{}
+		if err := json.Unmarshal([]byte(args[1].Str()), &raw); err != nil {
+			return NilV(), &RunError{Msg: fmt.Sprintf("JSONError: %v", err), Pos: pos, Ctx: ctx}
+		}
+		loaded, err := qkjsonFromGo(raw)
+		if err != nil {
+			return NilV(), &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
+		}
+		if !loaded.IsTable() {
+			return NilV(), &RunError{Msg: "JSONError: style 文本顶层必须是对象", Pos: pos, Ctx: ctx}
+		}
+		for k, v := range loaded.Table().m {
+			args[0].Table().m[k] = v
 		}
 		return NilV(), nil
 	}

@@ -1363,8 +1363,8 @@ func (in *interp) callMethod(obj Value, name string, args []Value, ctx *execCtx,
 			if len(args) < 1 || len(args) > 2 || !args[0].IsInt() {
 				return NilV(), &RunError{Msg: "TypeError: substring(start, end?) 需要 int 参数", Pos: pos, Ctx: ctx}
 			}
-			runes := []rune(o)
-			n := int64(len(runes))
+			// 极限优化：不做全量 []rune 转换，前缀解码到字节偏移后再切片（零拷贝）
+			n := int64(utf8.RuneCountInString(o))
 			start := args[0].Int()
 			end := n
 			if len(args) == 2 {
@@ -1376,7 +1376,17 @@ func (in *interp) callMethod(obj Value, name string, args []Value, ctx *execCtx,
 			if start < 0 || end < start || end > n {
 				return NilV(), &RunError{Msg: fmt.Sprintf("StringIndexOutOfBoundsError: substring(%d, %d) 越界 [0,%d]", start, end, n), Pos: pos, Ctx: ctx}
 			}
-			return StrV(string(runes[start:end])), nil
+			b0 := 0
+			for k := int64(0); k < start; k++ {
+				_, sz := utf8.DecodeRuneInString(o[b0:])
+				b0 += sz
+			}
+			b1 := b0
+			for k := start; k < end; k++ {
+				_, sz := utf8.DecodeRuneInString(o[b1:])
+				b1 += sz
+			}
+			return StrV(o[b0:b1]), nil
 		case "split":
 			if err := wantArity(name, 1, len(args), pos, ctx); err != nil {
 				return NilV(), err
@@ -1430,12 +1440,22 @@ func (in *interp) callMethod(obj Value, name string, args []Value, ctx *execCtx,
 			if !args[0].IsInt() {
 				return NilV(), &RunError{Msg: "TypeError: charAt 需要 int 索引", Pos: pos, Ctx: ctx}
 			}
-			runes := []rune(o)
+			// 极限优化：前缀解码到目标 rune，只解码 i 个字符
 			i := args[0].Int()
-			if i < 0 || i >= int64(len(runes)) {
-				return NilV(), &RunError{Msg: fmt.Sprintf("StringIndexOutOfBoundsError: charAt(%d) 越界 [0,%d]", i, len(runes)), Pos: pos, Ctx: ctx}
+			b := 0
+			for k := int64(0); k < i; k++ {
+				if b >= len(o) {
+					return NilV(), &RunError{Msg: fmt.Sprintf("StringIndexOutOfBoundsError: charAt(%d) 越界 [0,%d)", i, utf8.RuneCountInString(o)), Pos: pos, Ctx: ctx}
+				}
+				_, sz := utf8.DecodeRuneInString(o[b:])
+				b += sz
 			}
-			return StrV(string(runes[i])), nil
+			if b >= len(o) {
+				return NilV(), &RunError{Msg: fmt.Sprintf("StringIndexOutOfBoundsError: charAt(%d) 越界 [0,%d)", i, utf8.RuneCountInString(o)), Pos: pos, Ctx: ctx}
+			}
+			// 对齐到字符边界
+			_, sz := utf8.DecodeRuneInString(o[b:])
+			return StrV(o[b : b+sz]), nil
 		case "toInt":
 			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
 				return NilV(), err

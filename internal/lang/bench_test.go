@@ -156,3 +156,55 @@ func BenchmarkGoSliceChurnGC(b *testing.B) {
 		}
 	}
 }
+
+// String 文本处理基准（1M 次）
+func BenchmarkStringProcessing1M(b *testing.B) {
+	srcs := []string{
+		`fn main(io IOStream) {
+    s String = "  Hello, QuarkLang World  ";
+    i int = 0;
+    t int = 0;
+    while (i < 1000000) {
+        t = t + s.trim().size();
+        i = i + 1;
+    }
+    io.println(t);
+}`,
+		`fn main(io IOStream) {
+    s String = "abcdefghijklmnopqrstuvwxyz0123456789";
+    i int = 0;
+    t int = 0;
+    while (i < 1000000) {
+        t = t + s.substring(4, 20).size();
+        i = i + 1;
+    }
+    io.println(t);
+}`,
+		`fn main(io IOStream) {
+    s String = "a,b,c,d,e,f,g,h,i,j";
+    i int = 0;
+    t int = 0;
+    while (i < 300000) {
+        parts List<String> = s.split(",");
+        t = t + parts.size();
+        i = i + 1;
+    }
+    io.println(t);
+}`,
+	}
+	names := []string{"trim+size", "substring", "split"}
+	for i, src := range srcs {
+		b.Run(names[i], func(b *testing.B) {
+			for n := 0; n < b.N; n++ {
+				prog, err := Compile(src)
+				if err != nil {
+					b.Fatal(err)
+				}
+				var sb strings.Builder
+				if err := Run(prog, "t.qk", nil, strings.NewReader(""), &sb); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}

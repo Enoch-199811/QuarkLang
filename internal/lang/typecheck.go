@@ -1713,8 +1713,8 @@ func (c *checker) inferCall(x *CallExpr, sc *cScope) (*Type, error) {
 		if id.Name == "qkexecv" {
 			want = 2
 		}
-		if err := c.checkArity(id.Name, want, len(args), id.Pos); err != nil {
-			return nil, err
+		if len(args) != want && len(args) != want+1 {
+			return nil, c.errf(id.Pos, "CompileError: %s expects %d args (可加 retries), got %d", id.Name, want, len(args))
 		}
 		if id.Name == "qkexec" && args[0].Kind != tString {
 			return nil, c.errf(id.Pos, "TypeError: qkexec requires a command String, got %s", args[0])
@@ -1734,16 +1734,16 @@ func (c *checker) inferCall(x *CallExpr, sc *cScope) (*Type, error) {
 		}
 		return tInputStreamV, nil
 	case "qkhttp_get":
-		if err := c.checkArity("qkhttp_get", 1, len(args), id.Pos); err != nil {
-			return nil, err
+		if len(args) != 1 && len(args) != 2 {
+			return nil, c.errf(id.Pos, "CompileError: qkhttp_get expects 1-2 args (url[, retries]), got %d", len(args))
 		}
 		if args[0].Kind != tString {
 			return nil, c.errf(id.Pos, "TypeError: qkhttp_get requires url String, got %s", args[0])
 		}
 		return tStringV, nil
 	case "qkhttp_post":
-		if err := c.checkArity("qkhttp_post", 3, len(args), id.Pos); err != nil {
-			return nil, err
+		if len(args) != 3 && len(args) != 4 {
+			return nil, c.errf(id.Pos, "CompileError: qkhttp_post expects 3-4 args (url, body, ct[, retries]), got %d", len(args))
 		}
 		for _, a := range args {
 			if a.Kind != tString {

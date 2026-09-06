@@ -2013,25 +2013,41 @@ func (in *interp) registerIOBuiltins() {
 	}
 	// [官方库 system 原语] 进程执行：qkexec(cmd) -> 退出码（shell -c）
 	in.builtins["qkexec"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
-		if len(args) != 1 || !args[0].IsStr() {
-			return NilV(), &RunError{Msg: "TypeError: qkexec(cmd String) 需要一个字符串命令", Pos: pos, Ctx: ctx}
+		if len(args) < 1 || len(args) > 2 || !args[0].IsStr() {
+			return NilV(), &RunError{Msg: "TypeError: qkexec(cmd String[, retries int])", Pos: pos, Ctx: ctx}
 		}
-		cmd := exec.Command("sh", "-c", args[0].Str())
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		err := cmd.Run()
-		if err != nil {
-			if ee, ok := err.(*exec.ExitError); ok {
-				return IntV(int64(ee.ExitCode())), nil
+		retries := retriesOf(args, pos, ctx)
+		var code int64
+		for attempt := 0; attempt <= retries; attempt++ {
+			if attempt > 0 {
+				time.Sleep(time.Duration(200*(1<<uint(attempt-1))) * time.Millisecond) // 指数退避
 			}
-			return NilV(), &RunError{Msg: fmt.Sprintf("IOError: 无法执行命令：%v", err), Pos: pos, Ctx: ctx}
+			cmd := exec.Command("sh", "-c", args[0].Str())
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			err := cmd.Run()
+			if err != nil {
+				if ee, ok := err.(*exec.ExitError); ok {
+					code = int64(ee.ExitCode())
+					if code != 0 && attempt < retries {
+						continue
+					}
+					return IntV(code), nil
+				}
+				if attempt < retries {
+					continue
+				}
+				return NilV(), &RunError{Msg: fmt.Sprintf("IOError: 无法执行命令：%v", err), Pos: pos, Ctx: ctx}
+			}
+			code = 0
+			break
 		}
-		return IntV(0), nil
+		return IntV(code), nil
 	}
 	// qkexecv(prog, args List<String>) -> 退出码（不经 shell，argv 直传）
 	in.builtins["qkexecv"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
-		if len(args) != 2 || !args[0].IsStr() || !args[1].IsList() {
-			return NilV(), &RunError{Msg: "TypeError: qkexecv(prog String, args List<String>)，需要两个参数", Pos: pos, Ctx: ctx}
+		if len(args) < 2 || len(args) > 3 || !args[0].IsStr() || !args[1].IsList() {
+			return NilV(), &RunError{Msg: "TypeError: qkexecv(prog String, args List<String>[, retries])", Pos: pos, Ctx: ctx}
 		}
 		argList := args[1].List()
 		argv := make([]string, 0, argList.Size())
@@ -2045,17 +2061,33 @@ func (in *interp) registerIOBuiltins() {
 			}
 			argv = append(argv, it.Str())
 		}
-		cmd := exec.Command(args[0].Str(), argv...)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		err := cmd.Run()
-		if err != nil {
-			if ee, ok := err.(*exec.ExitError); ok {
-				return IntV(int64(ee.ExitCode())), nil
+		retries := retriesOf(args, pos, ctx)
+		var code int64
+		for attempt := 0; attempt <= retries; attempt++ {
+			if attempt > 0 {
+				time.Sleep(time.Duration(200*(1<<uint(attempt-1))) * time.Millisecond)
 			}
-			return NilV(), &RunError{Msg: fmt.Sprintf("IOError: 无法启动程序：%v", err), Pos: pos, Ctx: ctx}
+			cmd := exec.Command(args[0].Str(), argv...)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			err := cmd.Run()
+			if err != nil {
+				if ee, ok := err.(*exec.ExitError); ok {
+					code = int64(ee.ExitCode())
+					if code != 0 && attempt < retries {
+						continue
+					}
+					return IntV(code), nil
+				}
+				if attempt < retries {
+					continue
+				}
+				return NilV(), &RunError{Msg: fmt.Sprintf("IOError: 无法启动程序：%v", err), Pos: pos, Ctx: ctx}
+			}
+			code = 0
+			break
 		}
-		return IntV(0), nil
+		return IntV(code), nil
 	}
 	// qkpopen(cmd) -> InputStream（捕获 stdout；8MB 上限）
 	in.builtins["qkpopen"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
@@ -2074,12 +2106,29 @@ func (in *interp) registerIOBuiltins() {
 		return InV(&InputStream{R: bytes.NewReader(out)}), nil
 	} // [actions 库原语] 网络层：qkhttp_get(url) -> String（10s 超时，8MiB 响应上限）
 	in.builtins["qkhttp_get"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
-		if len(args) != 1 || !args[0].IsStr() {
-			return NilV(), &RunError{Msg: "TypeError: qkhttp_get(url String) 需要一个 URL", Pos: pos, Ctx: ctx}
+		if len(args) < 1 || len(args) > 2 || !args[0].IsStr() {
+			return NilV(), &RunError{Msg: "TypeError: qkhttp_get(url String[, retries int])", Pos: pos, Ctx: ctx}
 		}
 		cli := &http.Client{Timeout: 10 * time.Second}
-		resp, err := cli.Get(args[0].Str())
-		if err != nil {
+		retries := retriesOf(args, pos, ctx)
+		var resp *http.Response
+		var err error
+		var lastStatus int
+		for attempt := 0; ; attempt++ {
+			resp, err = cli.Get(args[0].Str())
+			if resp != nil {
+				lastStatus = resp.StatusCode
+			}
+			if (err == nil && lastStatus < 500) || attempt >= retries {
+				break
+			}
+			if resp != nil {
+				resp.Body.Close()
+				resp = nil
+			}
+			time.Sleep(time.Duration(300*(1<<uint(attempt))) * time.Millisecond)
+		}
+		if err != nil && (resp == nil || lastStatus == 0) {
 			return NilV(), &RunError{Msg: fmt.Sprintf("IOError: 请求失败：%v", err), Pos: pos, Ctx: ctx}
 		}
 		defer resp.Body.Close()
@@ -2097,12 +2146,29 @@ func (in *interp) registerIOBuiltins() {
 	}
 	// qkhttp_post(url, body String, contentType String) -> String
 	in.builtins["qkhttp_post"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
-		if len(args) != 3 || !args[0].IsStr() || !args[1].IsStr() || !args[2].IsStr() {
-			return NilV(), &RunError{Msg: "TypeError: qkhttp_post(url, body String, contentType String)", Pos: pos, Ctx: ctx}
+		if len(args) < 3 || len(args) > 4 || !args[0].IsStr() || !args[1].IsStr() || !args[2].IsStr() {
+			return NilV(), &RunError{Msg: "TypeError: qkhttp_post(url, body, contentType[, retries])", Pos: pos, Ctx: ctx}
 		}
 		cli := &http.Client{Timeout: 10 * time.Second}
-		resp, err := cli.Post(args[0].Str(), args[2].Str(), strings.NewReader(args[1].Str()))
-		if err != nil {
+		retries := retriesOf(args, pos, ctx)
+		var resp *http.Response
+		var err error
+		var lastStatus int
+		for attempt := 0; ; attempt++ {
+			resp, err = cli.Post(args[0].Str(), args[2].Str(), strings.NewReader(args[1].Str()))
+			if resp != nil {
+				lastStatus = resp.StatusCode
+			}
+			if (err == nil && lastStatus < 500) || attempt >= retries {
+				break
+			}
+			if resp != nil {
+				resp.Body.Close()
+				resp = nil
+			}
+			time.Sleep(time.Duration(300*(1<<uint(attempt))) * time.Millisecond)
+		}
+		if err != nil && (resp == nil || lastStatus == 0) {
 			return NilV(), &RunError{Msg: fmt.Sprintf("IOError: 请求失败：%v", err), Pos: pos, Ctx: ctx}
 		}
 		defer resp.Body.Close()
@@ -2115,6 +2181,22 @@ func (in *interp) registerIOBuiltins() {
 		}
 		return StrV(string(body)), nil
 	}
+}
+
+// retriesOf 读取可选 retries 参数（默认 retries=1，即失败后再尝试 1 次；0=不重试）。
+func retriesOf(args []Value, pos Pos, ctx *execCtx) int {
+	if len(args) == 0 {
+		return 1
+	}
+	last := args[len(args)-1]
+	if last.IsInt() {
+		n := last.Int()
+		if n < 0 || n > 10 {
+			return 1
+		}
+		return int(n)
+	}
+	return 1
 }
 
 // registerTask 登记协程，返回其 pid。

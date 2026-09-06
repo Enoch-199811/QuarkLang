@@ -592,20 +592,26 @@ func Typecheck(prog *Program) error {
 		if !ok {
 			return &CheckError{Msg: fmt.Sprintf("CompileError: unknown interface %q", im.Iface), Pos: im.Pos}
 		}
-		def := c.impls[implKeyOf(im.Type, im.Iface)]
-		// 组合接口：递归收集 expand 展开的方法
-		methods := iface.Methods
-		for _, ex := range iface.Expands {
-			ei, ok := c.interfaces[ex]
-			if !ok {
-				return &CheckError{Msg: fmt.Sprintf("CompileError: expand interface %q 未定义", ex), Pos: im.Pos}
+		// 组合接口：递归收集 expand 展开的方法（含 expand 接口的 Expands 递归）
+		methods := append([]MethodSig{}, iface.Methods...)
+		collectExpands := func(names []string) {}
+		var collect func([]string)
+		collect = func(names []string) {
+			for _, ex := range names {
+				ei, ok := c.interfaces[ex]
+				if !ok {
+					return
+				}
+				methods = append(methods, ei.Methods...)
+				collect(ei.Expands)
 			}
-			methods = append(methods, ei.Methods...)
 		}
+		_ = collectExpands
+		collect(iface.Expands)
 		for _, sig := range methods {
-			fn := def.SelfMethods[sig.Name]
+			fn := c.selfMeth(im.Type, sig.Name)
 			if fn == nil {
-				fn = def.Methods[sig.Name]
+				fn = c.staticMeth(im.Type, sig.Name)
 			}
 			if fn == nil {
 				return &CheckError{Msg: fmt.Sprintf("CompileError: impl %s for %s: missing method %q", im.Type, im.Iface, sig.Name), Pos: im.Pos}

@@ -110,3 +110,39 @@ line2 "q" \n raw`+"`"+`;
 		t.Fatalf("got %q", out)
 	}
 }
+
+// expand interface X; 是接口体内的语句（而非常规声明）；dynamic 前缀；组合递归 + 多 impl 聚合满足
+func TestExpandStatementSyntax(t *testing.T) {
+	out, err := runSrc(t, `interface {
+    dynamic expand interface AddOperation;
+    dynamic fn ping(self Self) void;
+} Everything;
+
+struct {
+    x int;
+} Thing;
+
+impl Thing AddOperation {
+    fn add(self, o Thing) Thing {
+        r Thing; r.x = self.x + o.x; return r;
+    }
+} Thing;
+
+impl Thing Everything {
+    fn ping(self) void {
+    }
+} Thing;
+
+fn main(io IOStream) {
+    a Thing; a.x = 5;
+    b Thing; b.x = 7;
+    io.println((a + b).x);
+    io.println(a.ping());
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(out, "12\n") {
+		t.Fatalf("got %q", out)
+	}
+}

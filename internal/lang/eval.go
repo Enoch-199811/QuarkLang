@@ -316,6 +316,7 @@ type ImplDef struct {
 type interp struct {
 	ctxHead     atomic.Pointer[execCtx]
 	fns         map[string]*Func
+	overloads   map[string][]*Func
 	libObjs     map[string]*libObj // library 系统库绑定对象（懒加载句柄）
 	fb          *framebuffer       // cleg 渲染帧缓冲（预分配复用，零分配渲染路径）
 	sigs        map[string]*signDef
@@ -358,10 +359,19 @@ func runWithInterp(prog *Program, filename string, args []string, stdin io.Reade
 	in.globalScope = newScope(nil)
 	_ = in.globalScope.declare("DynamicStackAndHeap", StrV("DynamicStackAndHeap"), Pos{})
 	for _, f := range prog.Funcs {
+		nfn := &Func{Name: f.Name, Params: f.Params, Ret: f.Ret, Body: f.Body, Pos: f.Pos}
 		if _, dup := in.fns[f.Name]; dup {
-			return nil, fmt.Errorf("CompileError: duplicate function %q", f.Name)
+			if !sameSig(in.fns[f.Name], nfn) {
+				if in.overloads == nil {
+					in.overloads = map[string][]*Func{}
+				}
+				in.overloads[f.Name] = append(in.overloads[f.Name], nfn)
+			} else {
+				return nil, fmt.Errorf("CompileError: duplicate overload %q", f.Name)
+			}
+		} else {
+			in.fns[f.Name] = nfn
 		}
-		in.fns[f.Name] = &Func{Name: f.Name, Params: f.Params, Ret: f.Ret, Body: f.Body, Pos: f.Pos}
 	}
 	// 函数表（FnIdx 索引，顺序与 FnList 一致——fns 填充后）
 	for _, fd := range prog.FnList {
@@ -1026,19 +1036,76 @@ func evalMember(obj Value, name string, pos Pos, ctx *execCtx) (Value, error) {
 }
 
 func (in *interp) evalCall(c *CallExpr, sc *scope, ctx *execCtx) (Value, error) {
+	// 内置签名 @styleConfigure(file)：先读 JSON 文件 → merge 进被调用首参节点的 style，再执行调用
+	if c.Sign != nil && c.Sign.Name == "styleConfigure" {
+		if len(c.Sign.Args) != 1 {
+			return NilV(), &RunError{Msg: "TypeError: @styleConfigure(file String)", Pos: c.Pos, Ctx: ctx}
+		}
+		fv, err := in.evalExpr(c.Sign.Args[0], sc, ctx)
+		if err != nil {
+			return NilV(), err
+		}
+		if !fv.IsStr() {
+			return NilV(), &RunError{Msg: "TypeError: @styleConfigure(file String)", Pos: c.Pos, Ctx: ctx}
+		}
+		raw, err := os.ReadFile(fv.Str())
+		if err != nil {
+			return NilV(), &RunError{Msg: "IOError: " + err.Error(), Pos: c.Pos, Ctx: ctx}
+		}
+		var js interface{}
+		if err := json.Unmarshal(raw, &js); err != nil {
+			return NilV(), &RunError{Msg: "JSONError: " + err.Error(), Pos: c.Pos, Ctx: ctx}
+		}
+		loaded, err := qkjsonFromGo(js)
+		if err != nil {
+			return NilV(), &RunError{Msg: err.Error(), Pos: c.Pos, Ctx: ctx}
+		}
+		if loaded.IsTable() {
+			// 找被调用首参（成员调用=接收者；普通调用=第一个实参）的 style 字段并 merge
+			var nodes []Value
+			if mem, ok := c.Fn.(*MemberExpr); ok {
+				if rv, err := in.evalExpr(mem.X, sc, ctx); err == nil {
+					nodes = append(nodes, rv)
+				}
+			} else {
+				for i, a := range c.Args {
+					if i == 0 {
+						if av, err := in.evalExpr(a, sc, ctx); err == nil {
+							nodes = append(nodes, av)
+						}
+						break
+					}
+				}
+			}
+			for _, n := range nodes {
+				if n.IsStruct() {
+					for k, v := range n.Struct().Fields {
+						if k == "style" && v.IsTable() {
+							for kk, vv := range loaded.Table().m {
+								v.Table().m[kk] = vv
+							}
+						}
+					}
+				}
+			}
+		}
+		clean := *c
+		clean.Sign = nil
+		return in.evalExpr(&clean, sc, ctx)
+	}
 	// Signature wrapper: f(args) @sign(prefix) -> sign::call(prefix)(ctx) (spec §6).
 	if c.Sign != nil {
 		id, ok := c.Fn.(*Ident)
 		if !ok {
 			return NilV(), &RunError{Msg: "TypeError: a signature can only wrap a direct function call", Pos: c.Pos, Ctx: ctx}
 		}
-		fn, ok := in.fns[id.Name]
-		if !ok {
-			return NilV(), &RunError{Msg: fmt.Sprintf("CompileError: undeclared function %q", id.Name), Pos: id.Pos, Ctx: ctx}
-		}
 		argVals, err := in.evalArgs(c.Args, sc, ctx)
 		if err != nil {
 			return NilV(), err
+		}
+		fn := in.bestMatchV(in.allDefs(id.Name), argVals)
+		if fn == nil {
+			return NilV(), &RunError{Msg: fmt.Sprintf("CompileError: 未找到匹配重载 %q", id.Name), Pos: id.Pos, Ctx: ctx}
 		}
 		if len(argVals) != len(fn.Params) {
 			return NilV(), &RunError{Msg: fmt.Sprintf("CompileError: %s expects %d args, got %d", fn.Name, len(fn.Params), len(argVals)), Pos: id.Pos, Ctx: ctx}
@@ -1091,11 +1158,15 @@ func (in *interp) evalCall(c *CallExpr, sc *scope, ctx *execCtx) (Value, error) 
 	if err != nil {
 		return NilV(), err
 	}
-	// FnIdx 编译期已解析：直取 fnList，免 map 哈希
-	if c.FnIdx >= 0 && c.FnIdx < len(in.fnList) {
+	// FnIdx 编译期已解析：无重载时直取 fnList（免 map 哈希热路径）
+	if c.FnIdx >= 0 && c.FnIdx < len(in.fnList) && len(in.overloads[id.Name]) == 0 {
 		return in.callFunc(in.fnList[c.FnIdx], argVals, id.Pos, ctx.depth)
 	}
-	if fn, ok := in.fns[id.Name]; ok {
+	if defs := in.allDefs(id.Name); len(defs) > 0 {
+		fn := in.bestMatchV(defs, argVals)
+		if fn == nil {
+			return NilV(), &RunError{Msg: fmt.Sprintf("CompileError: 未找到匹配重载 %q", id.Name), Pos: id.Pos, Ctx: ctx}
+		}
 		return in.callFunc(fn, argVals, id.Pos, ctx.depth)
 	}
 	// 函数引用变量：f 是变量且值为 FuncValue → 调用
@@ -1382,6 +1453,35 @@ func (in *interp) callMethod(obj Value, name string, args []Value, ctx *execCtx,
 				return NilV(), &RunError{Msg: "TypeError: thread.talk 需要 channel 类实例", Pos: pos, Ctx: ctx}
 			}
 			return NilV(), nil
+		}
+	} else if obj.IsFile() {
+		f := obj.File()
+		switch name {
+		case "read":
+			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
+				return NilV(), err
+			}
+			b, err := os.ReadFile(f.Path)
+			if err != nil {
+				return NilV(), &RunError{Msg: "IOError: " + err.Error(), Pos: pos, Ctx: ctx}
+			}
+			return StrV(string(b)), nil
+		case "write":
+			if err := wantArity(name, 1, len(args), pos, ctx); err != nil || !args[0].IsStr() {
+				if err != nil {
+					return NilV(), err
+				}
+				return NilV(), &RunError{Msg: "TypeError: write(s String)", Pos: pos, Ctx: ctx}
+			}
+			if err := os.WriteFile(f.Path, []byte(args[0].Str()), 0o644); err != nil {
+				return NilV(), &RunError{Msg: "IOError: " + err.Error(), Pos: pos, Ctx: ctx}
+			}
+			return NilV(), nil
+		case "name":
+			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
+				return NilV(), err
+			}
+			return StrV(f.Path), nil
 		}
 	} else if obj.IsInt() || obj.IsFloat() || obj.IsBool() {
 		if name == "toString" {
@@ -1842,10 +1942,60 @@ func (in *interp) evalScopeCall(x *ScopeCall, sc *scope, ctx *execCtx) (Value, e
 		}
 		return NilV(), &RunError{Msg: fmt.Sprintf("TypeError: IO has no static method %q", x.Name), Pos: x.Pos, Ctx: ctx}
 	}
+	if x.Scope == "file" && x.Name == "new" {
+		if len(args) != 1 || !args[0].IsStr() {
+			return NilV(), &RunError{Msg: "TypeError: file::new(name String)", Pos: x.Pos, Ctx: ctx}
+		}
+		return FileV(&FileValue{Path: args[0].Str()}), nil
+	}
 	if fn := in.staticMethodOf(x.Scope, x.Name); fn != nil {
 		return in.callFunc(fn, args, x.Pos, ctx.depth)
 	}
 	return NilV(), &RunError{Msg: fmt.Sprintf("CompileError: unknown scope %q", x.Scope), Pos: x.Pos, Ctx: ctx}
+}
+
+// allDefs 函数全定义（主 + 重载）。
+func (in *interp) allDefs(name string) []*Func {
+	if fn, ok := in.fns[name]; ok {
+		return append([]*Func{fn}, in.overloads[name]...)
+	}
+	return in.overloads[name]
+}
+
+// bestMatchV 按实参值选最优重载（参数数匹配优先；类型 Kind 一致计分最高；唯一最优取胜）。
+func (in *interp) bestMatchV(defs []*Func, args []Value) *Func {
+	var best *Func
+	bestScore := -1
+	for _, fn := range defs {
+		if len(fn.Params) != len(args) {
+			continue
+		}
+		score := 0
+		for i := range fn.Params {
+			tp := fn.Params[i].Type
+			switch {
+			case (tp == "int" || tp == "long" || tp == "char") && args[i].IsInt():
+				score += 10
+			case (tp == "float" || tp == "double") && args[i].IsFloat():
+				score += 10
+			case (tp == "f32") && args[i].IsFloat():
+				score += 10
+			case tp == "String" && args[i].IsStr():
+				score += 10
+			case tp == "bool" && args[i].IsBool():
+				score += 10
+			case tp == "any" || tp == "interface{}" || tp == "":
+				score += 2
+			default:
+				score += 3
+			}
+		}
+		if score > bestScore {
+			best = fn
+			bestScore = score
+		}
+	}
+	return best
 }
 
 // selfMethodOf 聚合多 impl 查找实例方法（self 首参）。
@@ -2306,6 +2456,51 @@ func (in *interp) registerIOBuiltins() {
 	in.builtins["qkscreen_close"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
 		if err := screenClose(); err != nil {
 			return NilV(), &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
+		}
+		return NilV(), nil
+	}
+	// [file 原语] 读/写全文件
+	in.builtins["qkfile_read"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+		if len(args) != 1 || !args[0].IsStr() {
+			return NilV(), &RunError{Msg: "TypeError: qkfile_read(path String)", Pos: pos, Ctx: ctx}
+		}
+		b, err := os.ReadFile(args[0].Str())
+		if err != nil {
+			return NilV(), &RunError{Msg: fmt.Sprintf("IOError: %v", err), Pos: pos, Ctx: ctx}
+		}
+		return StrV(string(b)), nil
+	}
+	in.builtins["qkfile_write"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+		if len(args) != 2 || !args[0].IsStr() || !args[1].IsStr() {
+			return NilV(), &RunError{Msg: "TypeError: qkfile_write(path String, content String)", Pos: pos, Ctx: ctx}
+		}
+		if err := os.WriteFile(args[0].Str(), []byte(args[1].Str()), 0o644); err != nil {
+			return NilV(), &RunError{Msg: fmt.Sprintf("IOError: %v", err), Pos: pos, Ctx: ctx}
+		}
+		return NilV(), nil
+	}
+	// [cleg style 装载] qkcleg_style_load(styleTable, path)：读 JSON 文件 → HashTable → merge 进 style
+	in.builtins["qkcleg_style_load"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+		if len(args) != 2 || !args[0].IsTable() || !args[1].IsStr() {
+			return NilV(), &RunError{Msg: "TypeError: qkcleg_style_load(style HashTable, path String)", Pos: pos, Ctx: ctx}
+		}
+		b, err := os.ReadFile(args[1].Str())
+		if err != nil {
+			return NilV(), &RunError{Msg: fmt.Sprintf("IOError: %v", err), Pos: pos, Ctx: ctx}
+		}
+		var raw interface{}
+		if err := json.Unmarshal(b, &raw); err != nil {
+			return NilV(), &RunError{Msg: fmt.Sprintf("JSONError: %v", err), Pos: pos, Ctx: ctx}
+		}
+		loaded, err := qkjsonFromGo(raw)
+		if err != nil {
+			return NilV(), &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
+		}
+		if !loaded.IsTable() {
+			return NilV(), &RunError{Msg: "JSONError: style 文件顶层必须是对象", Pos: pos, Ctx: ctx}
+		}
+		for k, v := range loaded.Table().m {
+			args[0].Table().m[k] = v
 		}
 		return NilV(), nil
 	}

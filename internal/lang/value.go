@@ -44,7 +44,20 @@ const (
 	vChan
 	vStruct
 	vLib
+	vFile
 )
+
+func FileV(f *FileValue) Value { return Value{tag: byte(vFile), ptr: unsafe.Pointer(f)} }
+
+// ---- file 值（路径对象） ----
+type FileValue struct {
+	Path string
+}
+
+func (f *FileValue) IsFile() bool     { return true }
+func (f *FileValue) FilePath() string { return f.Path }
+func (f *FileValue) String() string   { return "<file " + f.Path + ">" }
+func (f *FileValue) TypeName() string { return "file" }
 
 // ---- 标量构造器（保持旧名，调用点无需改） ----
 
@@ -105,6 +118,14 @@ func (v Value) IsCopyd() bool    { return v.tag == byte(vCopyd) }
 func (v Value) IsChan() bool     { return v.tag == byte(vChan) }
 func (v Value) IsStruct() bool   { return v.tag == byte(vStruct) }
 func (v Value) IsLib() bool      { return v.tag == byte(vLib) }
+func (v Value) IsFile() bool     { return v.tag == byte(vFile) }
+func (v Value) File() *FileValue {
+	ptr := (*FileValue)(v.ptr)
+	if ptr == nil {
+		return &FileValue{}
+	}
+	return ptr
+}
 
 // ---- 取值（调用方保证类型匹配；不匹配返回零值/空，语义由测试兜底） ----
 

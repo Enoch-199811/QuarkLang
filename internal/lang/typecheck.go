@@ -35,6 +35,7 @@ const (
 	tTypeVar
 	tLib
 	tInterface
+	tFile
 )
 
 type Type struct {
@@ -75,7 +76,7 @@ var kindName = map[tKind]string{
 	tNil: "nil", tAny: "interface{}", tFuncBuffer: "FuncBuffer",
 	tIOStream: "IOStream", tInputStream: "InputStream", tOutputStream: "OutputStream",
 	tChannel: "Channel", tTask: "Task", tMemorize: "memorize", tMemory: "memory",
-	tFunc: "fn", tStruct: "struct", tTaskm: "taskm", tPtr: "ptr", tCopyd: "Copyd", tNull: "null", tTypeVar: "typevar", tLib: "library", tInterface: "interface",
+	tFunc: "fn", tStruct: "struct", tTaskm: "taskm", tPtr: "ptr", tCopyd: "Copyd", tNull: "null", tTypeVar: "typevar", tLib: "library", tInterface: "interface", tFile: "file",
 }
 
 func (t *Type) String() string {
@@ -362,6 +363,7 @@ func (s *cScope) lookup(name string) *cVar {
 
 type checker struct {
 	fns        map[string]*Func
+	overloads  map[string][]*Func
 	sigs       map[string]int // 签名名 → <Prefix> 参数个数（memorize:1, async:0）
 	structs    map[string]*StructDef
 	interfaces map[string]*InterfaceDef
@@ -374,6 +376,9 @@ type checker struct {
 }
 
 // Typecheck 执行 §11.1 的全部编译期严格检查。
+// file 类型：值=路径；file::new(name)；f.read() / f.write(s)
+var tFileV = &Type{Kind: tFile, FName: "file"}
+
 // implKeyOf 多 impl 键：无接口（自我实现/静态）= Type；接口实现 = Type + "\x00" + Iface。
 func implKeyOf(typ, iface string) string {
 	if iface == "" {
@@ -483,6 +488,7 @@ func Typecheck(prog *Program) error {
 		interfaces: map[string]*InterfaceDef{},
 		impls:      map[string]*ImplDef{},
 		aliases:    map[string]string{},
+		overloads:  map[string][]*Func{},
 	}
 	registerBuiltinIfaces(c.interfaces)
 	for _, a := range prog.TypeAliases {
@@ -492,10 +498,18 @@ func Typecheck(prog *Program) error {
 		c.aliases[a.Name] = a.Type
 	}
 	for _, f := range prog.Funcs {
+		nfn := &Func{Name: f.Name, TypeParams: f.TypeParams, Params: f.Params, Ret: f.Ret, Body: f.Body, Pos: f.Pos}
 		if _, dup := c.fns[f.Name]; dup {
-			return &CheckError{Msg: fmt.Sprintf("CompileError: duplicate function %q", f.Name), Pos: f.Pos}
+			// 函数重载：同名追加（签名不同即可；完全相同报错）
+			for _, od := range c.overloads[f.Name] {
+				if sameSig(od, nfn) {
+					return &CheckError{Msg: fmt.Sprintf("CompileError: duplicate overload %q (与已有签名相同)", f.Name), Pos: f.Pos}
+				}
+			}
+			c.overloads[f.Name] = append(c.overloads[f.Name], nfn)
+		} else {
+			c.fns[f.Name] = nfn
 		}
-		c.fns[f.Name] = &Func{Name: f.Name, TypeParams: f.TypeParams, Params: f.Params, Ret: f.Ret, Body: f.Body, Pos: f.Pos}
 	}
 	for _, s := range prog.Structs {
 		if _, dup := c.structs[s.Name]; dup {
@@ -690,6 +704,8 @@ func (c *checker) substType(s string, subst map[string]*Type, pos Pos) (*Type, e
 		return tAnyV, nil // v2：void = 空接口 interface{} 的默认名字
 	case "FuncBuffer":
 		return tFuncBufferV, nil
+	case "file":
+		return tFileV, nil
 	case "IOStream":
 		return tIOStreamV, nil
 	case "InputStream", "istream", "ifstream":
@@ -780,7 +796,7 @@ func (c *checker) substType(s string, subst map[string]*Type, pos Pos) (*Type, e
 // isBuiltinFuncName 判断是否为内置函数（可作为函数引用传递）。
 func isBuiltinFuncName(s string) bool {
 	switch s {
-	case "rand", "sum", "FileInputStream", "FileOutputStream", "ifstream", "ofstream", "iofstream", "ConsoleInputStream", "ConsoleOutputStream", "qkexec", "qkexecv", "qkpopen", "qkhttp_get", "qkhttp_post", "qkjson_dumps", "qkjson_loads", "qkcleg_create", "qkscreen_open", "qkscreen_present", "qkscreen_close", "qkcleg_clear", "qkcleg_rect", "qkcleg_text", "qkcleg_frame":
+	case "rand", "sum", "FileInputStream", "FileOutputStream", "ifstream", "ofstream", "iofstream", "ConsoleInputStream", "ConsoleOutputStream", "qkexec", "qkexecv", "qkpopen", "qkhttp_get", "qkhttp_post", "qkjson_dumps", "qkjson_loads", "qkfile_read", "qkfile_write", "qkcleg_style_load", "qkcleg_create", "qkscreen_open", "qkscreen_present", "qkscreen_close", "qkcleg_clear", "qkcleg_rect", "qkcleg_text", "qkcleg_frame":
 		return true
 	}
 	return false
@@ -1286,6 +1302,61 @@ func (c *checker) infer(e Expr, sc *cScope) (*Type, error) {
 
 func isNumeric(t *Type) bool { return t.Kind == tInt || t.Kind == tFloat }
 
+// sameSig 判断两个函数签名是否相同（参数个数与类型注解完全一致）。
+func sameSig(a, b *Func) bool {
+	if len(a.Params) != len(b.Params) {
+		return false
+	}
+	for i := range a.Params {
+		if a.Params[i].Type != b.Params[i].Type {
+			return false
+		}
+	}
+	return true
+}
+
+// allDefs 函数全定义（主 + 重载）。
+func (c *checker) allDefs(name string) []*Func {
+	if fn, ok := c.fns[name]; ok {
+		return append([]*Func{fn}, c.overloads[name]...)
+	}
+	return c.overloads[name]
+}
+
+// bestMatchT 按实参类型选最优重载。
+func (c *checker) bestMatchT(defs []*Func, tys []*Type) *Func {
+	var best *Func
+	bestScore := -1
+	for _, fn := range defs {
+		if len(fn.Params) != len(tys) {
+			continue
+		}
+		score := 0
+		ok := true
+		for i, p := range fn.Params {
+			pt, err := c.substType(p.Type, c.curSubst, fn.Pos)
+			if err != nil {
+				pt = tAnyV
+			}
+			if tys[i].Kind == pt.Kind {
+				score += 10
+			} else if assignable(tys[i], pt) {
+				score += 5
+			} else if pt.Kind == tAny {
+				score += 1
+			} else {
+				ok = false
+				break
+			}
+		}
+		if ok && score > bestScore {
+			best = fn
+			bestScore = score
+		}
+	}
+	return best
+}
+
 func (c *checker) inferBin(x *BinOp, sc *cScope) (*Type, error) {
 	l, err := c.infer(x.L, sc)
 	if err != nil {
@@ -1497,6 +1568,20 @@ func (c *checker) methodType(recv *Type, name string, args []*Type, pos Pos) (*T
 			return tStringV, nil
 		}
 		return nil, c.errf(pos, "TypeError: no method %q", name)
+	case tFile:
+		switch name {
+		case "read", "name":
+			if err := c.checkArity(name, 0, len(args), pos); err != nil {
+				return nil, err
+			}
+			return tStringV, nil
+		case "write":
+			if err := c.checkArity(name, 1, len(args), pos); err != nil {
+				return nil, err
+			}
+			return tNilV, nil
+		}
+		return nil, c.errf(pos, "TypeError: file 没有方法 %q", name)
 	case tString:
 		switch name {
 		case "size", "indexOf", "toInt":
@@ -1884,6 +1969,35 @@ func (c *checker) methodType(recv *Type, name string, args []*Type, pos Pos) (*T
 func (c *checker) inferCall(x *CallExpr, sc *cScope) (*Type, error) {
 	// 签名包装（§6）：fn(args) @sign(prefix)
 	if x.Sign != nil {
+		// 内置签名 @styleConfigure(file)：JSON 配置→首参节点 style；跟随被包装调用（方法/函数）类型
+		if x.Sign.Name == "styleConfigure" {
+			if m, ok := x.Fn.(*MemberExpr); ok {
+				recv, err := c.infer(m.X, sc)
+				if err != nil {
+					return nil, err
+				}
+				argTys, err := c.inferArgs(x.Args, sc)
+				if err != nil {
+					return nil, err
+				}
+				return c.methodType(recv, m.Name, argTys, x.Pos)
+			}
+			id, ok := x.Fn.(*Ident)
+			if !ok {
+				return nil, c.errf(x.Pos, "TypeError: @styleConfigure 只能包装函数/方法调用")
+			}
+			fn, ok := c.fns[id.Name]
+			if !ok {
+				return nil, c.errf(id.Pos, "CompileError: undeclared function %q", id.Name)
+			}
+			if err := c.checkCallArgs(fn, x.Args, sc, x.Pos); err != nil {
+				return nil, err
+			}
+			if fn.Ret != "" {
+				return c.substType(fn.Ret, c.curSubst, x.Pos)
+			}
+			return tNilV, nil
+		}
 		id, ok := x.Fn.(*Ident)
 		if !ok {
 			return nil, c.errf(x.Pos, "TypeError: a signature can only wrap a direct function call")
@@ -1936,7 +2050,15 @@ func (c *checker) inferCall(x *CallExpr, sc *cScope) (*Type, error) {
 		}
 		return tAnyV, nil
 	}
-	if fn, ok := c.fns[id.Name]; ok {
+	if defs := c.allDefs(id.Name); len(defs) > 0 {
+		argTys, aerr := c.inferArgs(x.Args, sc)
+		if aerr != nil {
+			return nil, aerr
+		}
+		fn := c.bestMatchT(defs, argTys)
+		if fn == nil {
+			return nil, c.errf(id.Pos, "CompileError: 未找到匹配重载 %q", id.Name)
+		}
 		if err := c.checkCallArgs(fn, x.Args, sc, x.Pos); err != nil {
 			return nil, err
 		}
@@ -1993,6 +2115,16 @@ func (c *checker) inferCall(x *CallExpr, sc *cScope) (*Type, error) {
 		return tNilV, nil
 	case "qkscreen_present", "qkscreen_close":
 		if err := c.checkArity(id.Name, 0, len(args), id.Pos); err != nil {
+			return nil, err
+		}
+		return tNilV, nil
+	case "qkfile_read":
+		if err := c.checkArity(id.Name, 1, len(args), id.Pos); err != nil {
+			return nil, err
+		}
+		return tStringV, nil
+	case "qkfile_write", "qkcleg_style_load":
+		if err := c.checkArity(id.Name, 2, len(args), id.Pos); err != nil {
 			return nil, err
 		}
 		return tNilV, nil
@@ -2234,6 +2366,12 @@ func (c *checker) inferScope(x *ScopeCall, sc *cScope) (*Type, error) {
 	case "taskm":
 		// taskm 是全局变量：正确语法是 taskm.spawn(...) 等
 		return nil, c.errf(x.Pos, "TypeError: taskm is a global variable — use taskm.spawn(...) / taskm.block(pid) / taskm.done(pid) / taskm.merge(pid) / taskm.channel([n])")
+	}
+	if x.Scope == "file" && x.Name == "new" {
+		if err := c.checkArity("file::new", 1, len(x.Args), x.Pos); err != nil {
+			return nil, err
+		}
+		return tFileV, nil
 	}
 	// 泛型静态方法：类型参数按 interface{} 宽松替换（聚合多个 impl，方法不重叠）
 	if defs := c.implDefsFor(x.Scope); len(defs) > 0 {

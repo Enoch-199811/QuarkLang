@@ -73,3 +73,40 @@ fn main(io IOStream) { io.println(1); }`)
 		t.Fatalf("expected method-sig error, got %v", err)
 	}
 }
+
+// 函数重载：同名多签名（参数数据/品种）按实参最优匹配
+func TestFunctionOverload(t *testing.T) {
+	out, err := runSrc(t, `fn add(a int, b int) int { return a + b; }
+fn add(a float, b float) float { return a + b; }
+fn add(a String, b String) String { return a + b; }
+fn add(a int, b int, c int) int { return a + b + c; }
+
+fn main(io IOStream) {
+    io.println(add(1, 2));
+    io.println(add(1.5, 2.5));
+    io.println(add("A", "B"));
+    io.println(add(1, 2, 3));
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "3\n4\nAB\n6\n" {
+		t.Fatalf("got %q", out)
+	}
+}
+
+// 反引号原始字符串（Go 语义）
+func TestRawString(t *testing.T) {
+	out, err := runSrc(t, `fn main(io IOStream) {
+    s String = `+"`"+`line1
+line2 "q" \n raw`+"`"+`;
+    io.println(s.size());
+    io.println(s);
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "22\nline1\nline2 \"q\" \\n raw\n" {
+		t.Fatalf("got %q", out)
+	}
+}

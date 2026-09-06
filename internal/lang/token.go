@@ -223,6 +223,8 @@ func (lx *lexer) next() (Token, error) {
 		return lx.lexNumber(line, col)
 	case c == '"':
 		return lx.lexString(line, col)
+	case c == '`':
+		return lx.lexRawString(line, col)
 	case isIdentStart(c):
 		return lx.lexIdent(line, col)
 	}
@@ -353,6 +355,26 @@ func (lx *lexer) lexNumber(line, col int) (Token, error) {
 		return Token{}, lx.errf(line, col, "invalid int literal %q", text)
 	}
 	return Token{Kind: TInt, Text: text, Int: n, Line: line, Col: col}, nil
+}
+
+// lexRawString 反引号原始字符串（同 Go：无转义、可多行、换行计入行号）。
+func (lx *lexer) lexRawString(line, col int) (Token, error) {
+	lx.advance() // `
+	start := lx.pos
+	for lx.pos < len(lx.src) {
+		c := lx.src[lx.pos]
+		if c == '\x60' {
+			text := lx.src[start:lx.pos]
+			lx.advance()
+			return Token{Kind: TStr, Text: text, Line: line, Col: col}, nil
+		}
+		if c == '\n' {
+			lx.line++
+			lx.col = 0
+		}
+		lx.advance()
+	}
+	return Token{}, lx.errf(line, col, "unterminated raw string")
 }
 
 func (lx *lexer) lexString(line, col int) (Token, error) {

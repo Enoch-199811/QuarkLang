@@ -320,6 +320,7 @@ type interp struct {
 	overloads   map[string][]*Func
 	libObjs     map[string]*libObj // library 系统库绑定对象（懒加载句柄）
 	fb          *framebuffer       // cleg 渲染帧缓冲（预分配复用，零分配渲染路径）
+	dbg         *dbgState          // --debug 断点状态（nil = 零开销）
 	sigs        map[string]*signDef
 	builtins    map[string]builtinFn
 	structs     map[string]*StructDef
@@ -459,6 +460,10 @@ func runWithInterp(prog *Program, filename string, args []string, stdin io.Reade
 		return nil, fmt.Errorf("CompileError: main must take 1-3 params in order (io IOStream, env HashTable<String,String>, args List<String>), got %d", len(mainFn.Params))
 	}
 	ctx := in.newCtx(mainFn, mainArgs, mainFn.Pos)
+	if pendingDebug != nil {
+		pendingDebug(in)
+		pendingDebug = nil
+	}
 	return in, in.execute(ctx)
 }
 
@@ -559,6 +564,10 @@ func (in *interp) execBlock(b *Block, sc *scope, ctx *execCtx) error {
 var errLoopBreak = errors.New("loop break")
 
 func (in *interp) execStmt(st Stmt, sc *scope, ctx *execCtx) error {
+	// 调试模式：断点检查（无 dbg = nil 单判定，零开销）
+	if in.dbg != nil {
+		in.hitBreak(stPos(st), sc)
+	}
 	switch s := st.(type) {
 	case *ExprStmt:
 		_, err := in.evalExpr(s.X, sc, ctx)

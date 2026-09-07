@@ -934,6 +934,15 @@ func (p *parser) parseBlock() (*Block, error) {
 }
 
 func (p *parser) parseStmt() (Stmt, error) {
+	// break; 跳出循环（while/for 体内）
+	if p.curIs(TIdent) && p.cur().Text == "break" {
+		bp := Pos{Line: p.cur().Line, Col: p.cur().Col}
+		p.advance()
+		if p.curIs(TSemi) {
+			p.advance()
+		}
+		return &BreakStmt{Pos: bp}, nil
+	}
 	// delete variable; 语句（xmind 内存：回收内存于 __delete__()）
 	if p.curIs(TIdent) && p.cur().Text == "delete" {
 		kw := p.advance()

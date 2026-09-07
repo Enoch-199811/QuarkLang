@@ -137,6 +137,14 @@ type DeleteStmt struct {
 	Pos Pos
 }
 
+
+// BreakStmt 跳出（仅限 while/for 循环体内）。
+type BreakStmt struct {
+	Pos Pos
+}
+
+func (b *BreakStmt) isStmt() {}
+
 type TryStmt struct {
 	Try          *Block
 	CatchVar     string

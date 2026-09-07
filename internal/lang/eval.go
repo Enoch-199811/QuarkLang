@@ -555,6 +555,9 @@ func (in *interp) execBlock(b *Block, sc *scope, ctx *execCtx) error {
 	return nil
 }
 
+// errLoopBreak 哨兵：break 跳出循环（while/for 捕获；顶层冒泡报 break outside loop）。
+var errLoopBreak = errors.New("loop break")
+
 func (in *interp) execStmt(st Stmt, sc *scope, ctx *execCtx) error {
 	switch s := st.(type) {
 	case *ExprStmt:
@@ -609,6 +612,9 @@ func (in *interp) execStmt(st Stmt, sc *scope, ctx *execCtx) error {
 			}
 		}
 		return nil
+	case *BreakStmt:
+		return errLoopBreak
+
 	case *ReturnStmt:
 		if s.X != nil {
 			v, err := in.evalExpr(s.X, sc, ctx)
@@ -648,6 +654,9 @@ func (in *interp) execStmt(st Stmt, sc *scope, ctx *execCtx) error {
 				return nil
 			}
 			if err := in.execBlock(s.Body, sc, ctx); err != nil {
+				if errors.Is(err, errLoopBreak) {
+					return nil
+				}
 				return err
 			}
 		}
@@ -671,6 +680,9 @@ func (in *interp) execStmt(st Stmt, sc *scope, ctx *execCtx) error {
 			}
 			inner.vars[s.Var] = item
 			if err := in.execBlock(s.Body, inner, ctx); err != nil {
+				if errors.Is(err, errLoopBreak) {
+					return nil
+				}
 				return err
 			}
 		}

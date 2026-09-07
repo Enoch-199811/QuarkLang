@@ -371,6 +371,7 @@ type checker struct {
 	aliases    map[string]string       // type <类型> 名字; 类型别名
 	libs       map[string]*LibraryDecl // library 系统库绑定
 	curRet     *Type
+	loopDepth  int
 	curSubst   map[string]*Type // 泛型方法体/调用点的类型参数替换
 	typeVars   map[string]bool  // 泛型函数当前作用域的类型参数（fn<T,...>）
 }
@@ -963,6 +964,11 @@ func (c *checker) checkStmt(st Stmt, sc *cScope) error {
 			}
 		}
 		return nil
+	case *BreakStmt:
+		if c.loopDepth == 0 {
+			return c.errf(s.Pos, "CompileError: break 只能在 while/for 循环体内")
+		}
+		return nil
 	case *IfStmt:
 		if err := c.requireBool(s.Cond, sc); err != nil {
 			return err
@@ -978,7 +984,10 @@ func (c *checker) checkStmt(st Stmt, sc *cScope) error {
 		if err := c.requireBool(s.Cond, sc); err != nil {
 			return err
 		}
-		return c.checkBlock(s.Body, sc)
+		c.loopDepth++
+		err := c.checkBlock(s.Body, sc)
+		c.loopDepth--
+		return err
 	case *ForStmt:
 		it, err := c.infer(s.Iter, sc)
 		if err != nil {

@@ -146,3 +146,30 @@ fn main(io IOStream) {
 		t.Fatalf("got %q", out)
 	}
 }
+
+// break 语句：while/for 循环内跳出；循环外编译报错
+func TestBreakStatement(t *testing.T) {
+	out, err := runSrc(t, `fn main(io IOStream) {
+    i int = 0;
+    while (i < 1000) {
+        if (i == 3) { break; }
+        i = i + 1;
+    }
+    io.println(i);
+    items List<int> = [1,2,3,4,5];
+    for (x : items) {
+        if (x == 4) { break; }
+        io.println(x);
+    }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "3\n1\n2\n3\n" {
+		t.Fatalf("got %q", out)
+	}
+	if _, err := runSrc(t, `fn main(io IOStream) { break; }`); err == nil ||
+		!strings.Contains(err.Error(), "break 只能在") {
+		t.Fatalf("outside-break should error, got %v", err)
+	}
+}

@@ -372,6 +372,11 @@ func (lx *lexer) lexRawString(line, col int) (Token, error) {
 			lx.line++
 			lx.col = 0
 		}
+		if c == '\r' {
+			// Go 语义：raw string 中的回车被丢弃
+			lx.advance()
+			continue
+		}
 		lx.advance()
 	}
 	return Token{}, lx.errf(line, col, "unterminated raw string")

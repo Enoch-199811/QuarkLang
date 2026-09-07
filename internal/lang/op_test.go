@@ -173,3 +173,21 @@ func TestBreakStatement(t *testing.T) {
 		t.Fatalf("outside-break should error, got %v", err)
 	}
 }
+
+// 字符串纯文本语义：双引号内字面（算式不解析）；\W 等未知转义保留字面；反引号含换行
+func TestStringLiteralSemantics(t *testing.T) {
+	out, err := runSrc(t, "fn main(io IOStream) {\n"+
+		"    a String = \"1 + 2\";\n"+
+		"    io.println(a);\n"+
+		"    b String = \"C:\\\\Windows\\\\Fonts\";\n"+
+		"    io.println(b);\n"+
+		"    c String = `x\\ny`;\n"+
+		"    io.println(c.size());\n"+
+		"}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "1 + 2\nC:\\Windows\\Fonts\n4\n" {
+		t.Fatalf("got %q", out)
+	}
+}

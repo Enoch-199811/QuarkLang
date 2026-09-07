@@ -407,7 +407,8 @@ func (lx *lexer) lexString(line, col int) (Token, error) {
 			case '\\':
 				sb = append(sb, '\\')
 			default:
-				return Token{}, lx.errf(lx.line, lx.col, "unknown escape sequence for character %c", e)
+				// 未知转义保留字面（纯文本语义：仅标准转义生效）
+				sb = append(sb, '\\', e)
 			}
 			lx.advance()
 			continue

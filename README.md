@@ -1,4 +1,4 @@
-# QuarkLang
+# QuarkLangQkc（QuarkLang 主仓——语言 + qkc 编译器）
 
 一门**编译型编程语言**：为高计算、高并发、海量临时数据场景设计。同一种语法，双后端：**Go 解释器**（开发/调试）+ **LLVM IR 编译器**（`qkc`，性能 = C 级）。
 
@@ -67,7 +67,7 @@ cd compiler && go build -o qkc .
 
 复现：`bench/Makefile`（跨语言）+ `docs/benchmarks.md`（方法/公正性声明）。
 
-## QuarkLang 官方项目
+## QuarkLangQkc（QuarkLang 主仓——语言 + qkc 编译器） 官方项目
 
 | 项目 | 说明 | 仓库 |
 |---|---|---|

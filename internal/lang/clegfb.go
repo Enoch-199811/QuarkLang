@@ -12,6 +12,7 @@ import (
 	"image/color"
 	"image/png"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -120,7 +121,8 @@ func (fb *framebuffer) drawGlyph(x, y int, glyph uint8, scale int, c uint32) {
 // 全部失败 → 内置 5x7 位图（回退链末端）。
 func (fb *framebuffer) drawTextChain(x, y int, text string, size int, c uint32, fontChain string) {
 	// 字体回退链：逐名探测系统字体路径（TTF 光栅）；全失败 → 内置 5x7 位图（链末端）
-	for _, name := range strings.Split(fontChain, ",") {
+	names := strings.Split(fontChain, ",")
+	for _, name := range names {
 		name = strings.TrimSpace(name)
 		if name == "" {
 			continue
@@ -133,7 +135,83 @@ func (fb *framebuffer) drawTextChain(x, y int, text string, size int, c uint32, 
 			}
 		}
 	}
+	// CJK 增强：文本含 CJK 字符 → 按字符集选择 CJK 字体（Noto Sans CJK / WenQuanYi / Source Han …）
+	if hasCJK(text) {
+		if p := cjkFontPath(); p != "" {
+			if ff, err := ftLoadFace(p, size); err == nil {
+				_ = ff
+				fb.ftDrawTextRunes(x, y, text, size, c, p)
+				return
+			}
+		}
+	}
 	fb.drawText(x, y, text, scaleFor(size), c)
+}
+
+// ftDrawTextRunes rune 级迭代光栅（CJK/宽字符；ASCII 字节路径不变）。
+func (fb *framebuffer) ftDrawTextRunes(x, y int, text string, px int, c uint32, path string) {
+	f, err := ftLoadFace(path, px)
+	if err != nil {
+		fb.drawText(x, y, text, scaleFor(px), c)
+		return
+	}
+	cx := x
+	for _, ch := range text {
+		if ch == '\n' {
+			cx = x
+			y += px + 4
+			continue
+		}
+		w, h, left, _, adv, data := f.ftRaster(ch, px)
+		if adv <= 0 && w == 0 {
+			cx += px / 2
+			continue
+		}
+		if w > 0 && h > 0 && data != nil {
+			for yy := 0; yy < h; yy++ {
+				rowY := y + yy - (px - ascOf(f))
+				if rowY < 0 || rowY >= fb.h {
+					continue
+				}
+				for xx := 0; xx < w; xx++ {
+					if data[yy*w+xx] > 60 {
+						fx := cx + left + xx
+						if fx >= 0 && fx < fb.w {
+							fb.buf[rowY*fb.w+fx] = c
+						}
+					}
+				}
+			}
+		}
+		cx += adv
+	}
+}
+
+func ascOf(f *ftFace) int {
+	return 0
+}
+
+// hasCJK 文本是否含 CJK 字符（含全角标点/假名/谚文）。
+func hasCJK(s string) bool {
+	for _, r := range s {
+		if r >= 0x2E80 && r <= 0x9FFF || r >= 0x3000 && r <= 0x303F || r >= 0xFF00 && r <= 0xFFEF {
+			return true
+		}
+	}
+	return false
+}
+
+// cjkFontPath 扫描系统字体索引寻找 CJK 字体（文件名含 CJK/NotoSansCJK/SourceHan/WenQuanYi/MSung 等）。
+func cjkFontPath() string {
+	for _, p := range fontIndexAll() {
+		base := strings.ToLower(filepath.Base(p))
+		if strings.Contains(base, "cjk") || strings.Contains(base, "notosanscjk") ||
+			strings.Contains(base, "sourcehan") || strings.Contains(base, "wenquanyi") ||
+			strings.Contains(base, "wqy") || strings.Contains(base, "msung") || strings.Contains(base, "simhei") {
+			return p
+		}
+	}
+	return ""
 }
 
 // scaleFor 字号→5x7 位图缩放（font-size 语义近似：px/8）。

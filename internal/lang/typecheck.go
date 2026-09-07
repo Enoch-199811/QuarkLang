@@ -1000,7 +1000,10 @@ func (c *checker) checkStmt(st Stmt, sc *cScope) error {
 		if err := inner.declare(s.Var, &cVar{typ: it.Elem, init: true}, s.Pos); err != nil {
 			return err
 		}
-		return c.checkBlock(s.Body, inner)
+		c.loopDepth++
+		err2 := c.checkBlock(s.Body, inner)
+		c.loopDepth--
+		return err2
 	case *DeclStmt:
 		// 变量修饰：copyd = 传时复制（类型标注追加 [Copyd]）；const = 常量
 		typStr := s.Type

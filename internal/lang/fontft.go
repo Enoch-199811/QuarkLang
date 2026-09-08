@@ -66,11 +66,17 @@ func ftLoadFace(path string, px int) (*ftFace, error) {
 }
 
 // ftRaster 光栅字符（像素尺寸 px）：返回 (w,h,left,top,advance,buffer)。
-func (f *ftFace) ftRaster(ch rune, px int) (int, int, int, int, int, []byte) {
+func (f *ftFace) ftRaster(ch rune, px int, hint int) (int, int, int, int, int, []byte) {
 	ftMu.Lock()
 	defer ftMu.Unlock()
 	cch := C.FT_ULong(ch)
-	if C.FT_Load_Char(f.face, cch, C.FT_LOAD_DEFAULT) != 0 {
+	loadFlags := C.FT_Int32(C.FT_LOAD_DEFAULT)
+	if hint == 1 {
+		loadFlags |= C.FT_LOAD_NO_HINTING
+	} else if hint == 2 {
+		loadFlags |= C.FT_LOAD_TARGET_LIGHT
+	}
+	if C.FT_Load_Char(f.face, cch, loadFlags) != 0 {
 		return 0, 0, 0, 0, 0, nil
 	}
 	if C.FT_Render_Glyph(f.face.glyph, C.FT_RENDER_MODE_NORMAL) != 0 {
@@ -91,7 +97,7 @@ func (f *ftFace) ftRaster(ch rune, px int) (int, int, int, int, int, []byte) {
 }
 
 // ftDrawText 在 framebuffer 绘制（无左移调整：x 直接基线语义，加 top 对齐）。
-func (fb *framebuffer) ftDrawText(x, y int, text string, px int, c uint32, path string) {
+func (fb *framebuffer) ftDrawText(x, y int, text string, px int, c uint32, path string, aa bool, hint int) {
 	f, err := ftLoadFace(path, px)
 	if err != nil {
 		fb.drawText(x, y, text, px/8, c)
@@ -105,28 +111,52 @@ func (fb *framebuffer) ftDrawText(x, y int, text string, px int, c uint32, path 
 			y += px + 4
 			continue
 		}
-		w, h, left, top, adv, data := f.ftRaster(ch, px)
+		w, h, left, _, adv, data := f.ftRaster(ch, px, hint)
 		if adv <= 0 && w == 0 {
 			cx += px / 2
 			continue
 		}
 		if w > 0 && h > 0 && data != nil {
 			for yy := 0; yy < h; yy++ {
-				dy := y - (top - (px - ySizeOfFace(f)))
-				_ = dy
 				rowY := y + yy - (px - yAscentOfFace(f))
+				if rowY < 0 || rowY >= fb.h {
+					continue
+				}
+				rowBase := rowY * fb.w
 				for xx := 0; xx < w; xx++ {
-					if data[yy*w+xx] > 60 {
-						fx := cx + left + xx
-						if fx >= 0 && fx < fb.w && rowY >= 0 && rowY < fb.h {
-							fb.buf[rowY*fb.w+fx] = c
-						}
+					a := data[yy*w+xx]
+					if a == 0 {
+						continue
 					}
+					fx := cx + left + xx
+					if fx < 0 || fx >= fb.w {
+						continue
+					}
+					if !aa || a == 255 {
+						fb.buf[rowBase+fx] = c
+						continue
+					}
+					d := fb.buf[rowBase+fx]
+					inv := 255 - int(a)
+					or := (int(c>>16&0xFF)*int(a) + int(d>>16&0xFF)*inv) / 255
+					og := (int(c>>8&0xFF)*int(a) + int(d>>8&0xFF)*inv) / 255
+					ob := (int(c&0xFF)*int(a) + int(d&0xFF)*inv) / 255
+					fb.buf[rowBase+fx] = uint32(or)<<16 | uint32(og)<<8 | uint32(ob)
 				}
 			}
 		}
 		cx += adv
 	}
+}
+
+// blendPixel 前景色按 alpha 混合进目标像素（RGB 通道；255 直写路径在调用方）。
+func blendPixel(dst *uint32, c uint32, a int) {
+	d := *dst
+	inv := 255 - a
+	or := (int(c>>16&0xFF)*a + int(d>>16&0xFF)*inv) / 255
+	og := (int(c>>8&0xFF)*a + int(d>>8&0xFF)*inv) / 255
+	ob := (int(c&0xFF)*a + int(d&0xFF)*inv) / 255
+	*dst = uint32(or)<<16 | uint32(og)<<8 | uint32(ob)
 }
 
 var ftAscentCache sync.Map // face pair -> ascent px
@@ -143,3 +173,50 @@ func yAscentOfFace(f *ftFace) int {
 }
 
 func ySizeOfFace(f *ftFace) int { return 0 }
+
+// ftDrawTextRunes rune 级迭代（CJK/宽字符；AA/hint 与字节路径一致）。
+func (fb *framebuffer) ftDrawTextRunes(x, y int, text string, px int, c uint32, path string, aa bool, hint int) {
+	f, err := ftLoadFace(path, px)
+	if err != nil {
+		fb.drawText(x, y, text, scaleFor(px), c)
+		return
+	}
+	cx := x
+	for _, ch := range text {
+		if ch == '\n' {
+			cx = x
+			y += px + 4
+			continue
+		}
+		w, h, left, _, adv, data := f.ftRaster(ch, px, hint)
+		if adv <= 0 && w == 0 {
+			cx += px / 2
+			continue
+		}
+		if w > 0 && h > 0 && data != nil {
+			for yy := 0; yy < h; yy++ {
+				rowY := y + yy - (px - yAscentOfFace(f))
+				if rowY < 0 || rowY >= fb.h {
+					continue
+				}
+				rowBase := rowY * fb.w
+				for xx := 0; xx < w; xx++ {
+					a := data[yy*w+xx]
+					if a == 0 {
+						continue
+					}
+					fx := cx + left + xx
+					if fx < 0 || fx >= fb.w {
+						continue
+					}
+					if !aa || a == 255 {
+						fb.buf[rowBase+fx] = c
+						continue
+					}
+					blendPixel(&fb.buf[rowBase+fx], c, int(a))
+				}
+			}
+		}
+		cx += adv
+	}
+}

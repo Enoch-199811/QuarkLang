@@ -130,7 +130,7 @@ func (fb *framebuffer) drawTextChain(x, y int, text string, size int, c uint32, 
 		if p := fontPathOf(name); p != "" {
 			if ff, err := ftLoadFace(p, size); err == nil {
 				_ = ff
-				fb.ftDrawText(x, y, text, size, c, p)
+				fb.ftDrawText(x, y, text, size, c, p, true, 0)
 				return
 			}
 		}
@@ -140,51 +140,12 @@ func (fb *framebuffer) drawTextChain(x, y int, text string, size int, c uint32, 
 		if p := cjkFontPath(); p != "" {
 			if ff, err := ftLoadFace(p, size); err == nil {
 				_ = ff
-				fb.ftDrawTextRunes(x, y, text, size, c, p)
+				fb.ftDrawTextRunes(x, y, text, size, c, p, true, 0)
 				return
 			}
 		}
 	}
 	fb.drawText(x, y, text, scaleFor(size), c)
-}
-
-// ftDrawTextRunes rune 级迭代光栅（CJK/宽字符；ASCII 字节路径不变）。
-func (fb *framebuffer) ftDrawTextRunes(x, y int, text string, px int, c uint32, path string) {
-	f, err := ftLoadFace(path, px)
-	if err != nil {
-		fb.drawText(x, y, text, scaleFor(px), c)
-		return
-	}
-	cx := x
-	for _, ch := range text {
-		if ch == '\n' {
-			cx = x
-			y += px + 4
-			continue
-		}
-		w, h, left, _, adv, data := f.ftRaster(ch, px)
-		if adv <= 0 && w == 0 {
-			cx += px / 2
-			continue
-		}
-		if w > 0 && h > 0 && data != nil {
-			for yy := 0; yy < h; yy++ {
-				rowY := y + yy - (px - ascOf(f))
-				if rowY < 0 || rowY >= fb.h {
-					continue
-				}
-				for xx := 0; xx < w; xx++ {
-					if data[yy*w+xx] > 60 {
-						fx := cx + left + xx
-						if fx >= 0 && fx < fb.w {
-							fb.buf[rowY*fb.w+fx] = c
-						}
-					}
-				}
-			}
-		}
-		cx += adv
-	}
 }
 
 func ascOf(f *ftFace) int {

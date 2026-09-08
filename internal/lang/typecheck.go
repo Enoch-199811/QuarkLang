@@ -831,7 +831,7 @@ func (c *checker) substType(s string, subst map[string]*Type, pos Pos) (*Type, e
 // isBuiltinFuncName 判断是否为内置函数（可作为函数引用传递）。
 func isBuiltinFuncName(s string) bool {
 	switch s {
-	case "rand", "sum", "FileInputStream", "FileOutputStream", "ifstream", "ofstream", "iofstream", "ConsoleInputStream", "ConsoleOutputStream", "qkexec", "qkexecv", "qkpopen", "qkhttp_get", "qkhttp_post", "qkjson_dumps", "qkjson_loads", "qkfile_read", "qkfile_write", "qkcleg_style_load", "qkcleg_style_parse", "qkcleg_create", "qksignal_emit", "qkstyle_get", "qkstyle_num", "qkstyle_cr", "qkscreen_open", "qkscreen_present", "qkscreen_close", "qkcleg_clear", "qkcleg_rect", "qkcleg_roundrect", "qkcleg_text", "qkcleg_text_ex", "qkcleg_frame":
+	case "rand", "sum", "FileInputStream", "FileOutputStream", "ifstream", "ofstream", "iofstream", "ConsoleInputStream", "ConsoleOutputStream", "qkexec", "qkexecv", "qkpopen", "qkhttp_get", "qkhttp_post", "qkjson_dumps", "qkjson_loads", "qkfile_read", "qkfile_write", "qkcleg_style_load", "qkcleg_style_parse", "qkcleg_create", "qkcleg_auto", "qkcleg_tick", "qksignal_emit", "qkstyle_get", "qkstyle_num", "qkstyle_cr", "qkscreen_open", "qkscreen_present", "qkscreen_close", "qkcleg_clear", "qkcleg_rect", "qkcleg_roundrect", "qkcleg_text", "qkcleg_text_ex", "qkcleg_frame":
 		return true
 	}
 	return false
@@ -2178,6 +2178,11 @@ func (c *checker) inferCall(x *CallExpr, sc *cScope) (*Type, error) {
 	case "qkfile_write", "qkcleg_style_load", "qkcleg_style_parse":
 		if err := c.checkArity(id.Name, 2, len(args), id.Pos); err != nil {
 			return nil, err
+		}
+		return tNilV, nil
+	case "qkcleg_auto", "qkcleg_tick":
+		if len(args) > 1 {
+			return nil, c.errf(id.Pos, "CompileError: %s(node)/%s()", id.Name, id.Name)
 		}
 		return tNilV, nil
 	case "qksignal_emit":

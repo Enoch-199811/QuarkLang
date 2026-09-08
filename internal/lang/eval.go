@@ -320,6 +320,7 @@ type interp struct {
 	overloads   map[string][]*Func
 	libObjs     map[string]*libObj // library 系统库绑定对象（懒加载句柄）
 	fb          *framebuffer       // cleg 渲染帧缓冲（预分配复用，零分配渲染路径）
+	autoNodes   []Value            // 自动重绘节点（qkcleg_auto 注册；tick 时逐个 render）
 	dbg         *dbgState          // --debug 断点状态（nil = 零开销）
 	sigs        map[string]*signDef
 	builtins    map[string]builtinFn
@@ -558,6 +559,28 @@ func (in *interp) execBlock(b *Block, sc *scope, ctx *execCtx) error {
 		}
 	}
 	return nil
+}
+
+// qkstyleLookup：QSS 键读取 + 旧别名回退（background-color←bg、font-size←size、font-family←font）——style 表口归一。
+func qkstyleLookup(t *HashTable, key Value) (Value, bool) {
+	if v, ok := t.Get(key); ok {
+		return v, true
+	}
+	if key.IsStr() {
+		var alias string
+		switch key.Str() {
+		case "background-color":
+			alias = "bg"
+		case "font-size":
+			alias = "size"
+		case "font-family":
+			alias = "font"
+		}
+		if alias != "" {
+			return t.Get(StrV(alias))
+		}
+	}
+	return NilV(), false
 }
 
 // errLoopBreak 哨兵：break 跳出循环（while/for 捕获；顶层冒泡报 break outside loop）。
@@ -2587,6 +2610,25 @@ func (in *interp) registerIOBuiltins() {
 		in.fb.reset(w, h)
 		return NilV(), nil
 	}
+
+	// [cleg 自动重绘] qkcleg_auto(node) 注册；qkcleg_tick() 逐个 render（帧循环模型）
+	in.builtins["qkcleg_auto"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+		if len(args) != 1 || !args[0].IsStruct() {
+			return NilV(), &RunError{Msg: "TypeError: qkcleg_auto(node ClegNode)", Pos: pos, Ctx: ctx}
+		}
+		in.autoNodes = append(in.autoNodes, args[0])
+		return NilV(), nil
+	}
+	in.builtins["qkcleg_tick"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
+		for _, n := range in.autoNodes {
+			if n.IsStruct() {
+				if _, err := in.callMethod(n, "render", nil, ctx, pos); err != nil {
+					return NilV(), err
+				}
+			}
+		}
+		return NilV(), nil
+	}
 	// [cleg 信号] qksignal_emit(node, name)：节点实现 onClicked 等方法则调用
 	in.builtins["qksignal_emit"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
 		if len(args) < 2 || !args[0].IsStruct() || !args[1].IsStr() {
@@ -2613,8 +2655,7 @@ func (in *interp) registerIOBuiltins() {
 		if len(args) != 3 || !args[0].IsTable() || !args[2].IsStr() {
 			return NilV(), &RunError{Msg: "TypeError: qkstyle_get(style, key, fallback String)", Pos: pos, Ctx: ctx}
 		}
-		v, ok := args[0].Table().Get(args[1])
-		if ok && v.IsStr() {
+		if v, ok := qkstyleLookup(args[0].Table(), args[1]); ok {
 			return v, nil
 		}
 		return StrV(args[2].Str()), nil
@@ -2623,7 +2664,7 @@ func (in *interp) registerIOBuiltins() {
 		if len(args) != 3 || !args[0].IsTable() {
 			return NilV(), &RunError{Msg: "TypeError: qkstyle_num(style, key, fb int)", Pos: pos, Ctx: ctx}
 		}
-		v, ok := args[0].Table().Get(args[1])
+		v, ok := qkstyleLookup(args[0].Table(), args[1])
 		if ok && v.IsStr() {
 			if n, err := strconv.Atoi(strings.TrimSpace(v.Str())); err == nil {
 				return IntV(int64(n)), nil
@@ -2635,7 +2676,7 @@ func (in *interp) registerIOBuiltins() {
 		if len(args) != 4 || !args[0].IsTable() {
 			return NilV(), &RunError{Msg: "TypeError: qkstyle_cr(style, key, idx, fb int)", Pos: pos, Ctx: ctx}
 		}
-		v, ok := args[0].Table().Get(args[1])
+		v, ok := qkstyleLookup(args[0].Table(), args[1])
 		idx := int(args[2].Int())
 		if ok && v.IsStr() {
 			parts := strings.Split(v.Str(), ",")

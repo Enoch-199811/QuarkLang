@@ -1,0 +1,7 @@
+# GitHub Linguist 语言统计修正
+# ffi_win.inc 是 Windows FFI 自研 ABI wrapper 的生成代码（1705 个 static 包装函数，515KB），
+# Linguist 按 .inc 后缀把它判成 C++，导致语言条显示 C++ 57%；标记为 generated 后不计入统计。
+internal/lang/ffi_win.inc linguist-generated=true
+
+# 编译产物：不参与 diff
+compiler/qkc binary

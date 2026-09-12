@@ -319,8 +319,6 @@ type interp struct {
 	fns         map[string]*Func
 	overloads   map[string][]*Func
 	libObjs     map[string]*libObj // library 系统库绑定对象（懒加载句柄）
-	fb          *framebuffer       // cleg 渲染帧缓冲（预分配复用，零分配渲染路径）
-	autoNodes   []Value            // 自动重绘节点（qkcleg_auto 注册；tick 时逐个 render）
 	dbg         *dbgState          // --debug 断点状态（nil = 零开销）
 	sigs        map[string]*signDef
 	builtins    map[string]builtinFn
@@ -1377,6 +1375,16 @@ func (in *interp) callMethod(obj Value, name string, args []Value, ctx *execCtx,
 				return NilV(), err
 			}
 			return BoolV(o.Contains(args[0])), nil
+		case "keys":
+			if err := wantArity(name, 0, len(args), pos, ctx); err != nil {
+				return NilV(), err
+			}
+			lst := NewList()
+			for _, kv := range o.Keys() {
+				lst.Append(kv)
+			}
+			return ListV(lst), nil
+
 		case "remove":
 			if err := wantArity(name, 1, len(args), pos, ctx); err != nil {
 				return NilV(), err
@@ -2505,30 +2513,6 @@ func (in *interp) registerIOBuiltins() {
 		return qkjsonFromGo(raw)
 	}
 	// [cleg 屏幕宿主] 跨系统窗口呈现（X11/GDI）
-	in.builtins["qkscreen_open"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
-		if len(args) != 3 || !args[0].IsInt() || !args[1].IsInt() || !args[2].IsStr() {
-			return NilV(), &RunError{Msg: "TypeError: qkscreen_open(w int, h int, title String)", Pos: pos, Ctx: ctx}
-		}
-		if err := screenOpen(int(args[0].Int()), int(args[1].Int()), args[2].Str()); err != nil {
-			return NilV(), &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
-		}
-		return NilV(), nil
-	}
-	in.builtins["qkscreen_present"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
-		if len(args) != 0 {
-			return NilV(), &RunError{Msg: "TypeError: qkscreen_present()", Pos: pos, Ctx: ctx}
-		}
-		if err := screenPresent(in.fb); err != nil {
-			return NilV(), &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
-		}
-		return NilV(), nil
-	}
-	in.builtins["qkscreen_close"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
-		if err := screenClose(); err != nil {
-			return NilV(), &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
-		}
-		return NilV(), nil
-	}
 	// [file 原语] 读/写全文件
 	in.builtins["qkfile_read"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
 		if len(args) != 1 || !args[0].IsStr() {
@@ -2550,85 +2534,10 @@ func (in *interp) registerIOBuiltins() {
 		return NilV(), nil
 	}
 	// [cleg style 解析] qkcleg_style_parse(styleTable, jsonText)：JSON 字符串 → HashTable → merge 进 style
-	in.builtins["qkcleg_style_parse"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
-		if len(args) != 2 || !args[0].IsTable() || !args[1].IsStr() {
-			return NilV(), &RunError{Msg: "TypeError: qkcleg_style_parse(style HashTable, jsonText String)", Pos: pos, Ctx: ctx}
-		}
-		var raw interface{}
-		if err := json.Unmarshal([]byte(args[1].Str()), &raw); err != nil {
-			return NilV(), &RunError{Msg: fmt.Sprintf("JSONError: %v", err), Pos: pos, Ctx: ctx}
-		}
-		loaded, err := qkjsonFromGo(raw)
-		if err != nil {
-			return NilV(), &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
-		}
-		if !loaded.IsTable() {
-			return NilV(), &RunError{Msg: "JSONError: style 文本顶层必须是对象", Pos: pos, Ctx: ctx}
-		}
-		for k, v := range loaded.Table().m {
-			args[0].Table().m[k] = v
-		}
-		return NilV(), nil
-	}
 	// [cleg style 装载] qkcleg_style_load(styleTable, path)：读 JSON 文件 → HashTable → merge 进 style
-	in.builtins["qkcleg_style_load"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
-		if len(args) != 2 || !args[0].IsTable() || !args[1].IsStr() {
-			return NilV(), &RunError{Msg: "TypeError: qkcleg_style_load(style HashTable, path String)", Pos: pos, Ctx: ctx}
-		}
-		b, err := os.ReadFile(args[1].Str())
-		if err != nil {
-			return NilV(), &RunError{Msg: fmt.Sprintf("IOError: %v", err), Pos: pos, Ctx: ctx}
-		}
-		var raw interface{}
-		if err := json.Unmarshal(b, &raw); err != nil {
-			return NilV(), &RunError{Msg: fmt.Sprintf("JSONError: %v", err), Pos: pos, Ctx: ctx}
-		}
-		loaded, err := qkjsonFromGo(raw)
-		if err != nil {
-			return NilV(), &RunError{Msg: err.Error(), Pos: pos, Ctx: ctx}
-		}
-		if !loaded.IsTable() {
-			return NilV(), &RunError{Msg: "JSONError: style 文件顶层必须是对象", Pos: pos, Ctx: ctx}
-		}
-		for k, v := range loaded.Table().m {
-			args[0].Table().m[k] = v
-		}
-		return NilV(), nil
-	}
 	// [cleg 渲染原语] CPU 光栅帧缓冲（性能极限：线性 u32、预分配、零分配热路径）
-	in.builtins["qkcleg_create"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
-		if len(args) != 2 || !args[0].IsInt() || !args[1].IsInt() {
-			return NilV(), &RunError{Msg: "TypeError: qkcleg_create(w int, h int)", Pos: pos, Ctx: ctx}
-		}
-		w, h := int(args[0].Int()), int(args[1].Int())
-		if w <= 0 || h <= 0 || w > 16384 || h > 16384 {
-			return NilV(), &RunError{Msg: "TypeError: 帧缓冲尺寸非法", Pos: pos, Ctx: ctx}
-		}
-		if in.fb == nil {
-			in.fb = &framebuffer{}
-		}
-		in.fb.reset(w, h)
-		return NilV(), nil
-	}
 
 	// [cleg 自动重绘] qkcleg_auto(node) 注册；qkcleg_tick() 逐个 render（帧循环模型）
-	in.builtins["qkcleg_auto"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
-		if len(args) != 1 || !args[0].IsStruct() {
-			return NilV(), &RunError{Msg: "TypeError: qkcleg_auto(node ClegNode)", Pos: pos, Ctx: ctx}
-		}
-		in.autoNodes = append(in.autoNodes, args[0])
-		return NilV(), nil
-	}
-	in.builtins["qkcleg_tick"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
-		for _, n := range in.autoNodes {
-			if n.IsStruct() {
-				if _, err := in.callMethod(n, "render", nil, ctx, pos); err != nil {
-					return NilV(), err
-				}
-			}
-		}
-		return NilV(), nil
-	}
 	// [cleg 信号] qksignal_emit(node, name)：节点实现 onClicked 等方法则调用
 	in.builtins["qksignal_emit"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
 		if len(args) < 2 || !args[0].IsStruct() || !args[1].IsStr() {
@@ -2651,113 +2560,6 @@ func (in *interp) registerIOBuiltins() {
 		return NilV(), nil
 	}
 	// [cleg qss 读取] 原语版：get/num/cr
-	in.builtins["qkstyle_get"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
-		if len(args) != 3 || !args[0].IsTable() || !args[2].IsStr() {
-			return NilV(), &RunError{Msg: "TypeError: qkstyle_get(style, key, fallback String)", Pos: pos, Ctx: ctx}
-		}
-		if v, ok := qkstyleLookup(args[0].Table(), args[1]); ok {
-			return v, nil
-		}
-		return StrV(args[2].Str()), nil
-	}
-	in.builtins["qkstyle_num"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
-		if len(args) != 3 || !args[0].IsTable() {
-			return NilV(), &RunError{Msg: "TypeError: qkstyle_num(style, key, fb int)", Pos: pos, Ctx: ctx}
-		}
-		v, ok := qkstyleLookup(args[0].Table(), args[1])
-		if ok && v.IsStr() {
-			if n, err := strconv.Atoi(strings.TrimSpace(v.Str())); err == nil {
-				return IntV(int64(n)), nil
-			}
-		}
-		return args[2], nil
-	}
-	in.builtins["qkstyle_cr"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
-		if len(args) != 4 || !args[0].IsTable() {
-			return NilV(), &RunError{Msg: "TypeError: qkstyle_cr(style, key, idx, fb int)", Pos: pos, Ctx: ctx}
-		}
-		v, ok := qkstyleLookup(args[0].Table(), args[1])
-		idx := int(args[2].Int())
-		if ok && v.IsStr() {
-			parts := strings.Split(v.Str(), ",")
-			if idx < len(parts) {
-				if n, err := strconv.Atoi(strings.TrimSpace(parts[idx])); err == nil {
-					return IntV(int64(n)), nil
-				}
-			}
-		}
-		return args[3], nil
-	}
-	in.builtins["qkcleg_clear"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
-		if len(args) != 3 || !args[0].IsInt() || !args[1].IsInt() || !args[2].IsInt() {
-			return NilV(), &RunError{Msg: "TypeError: qkcleg_clear(r,g,b)", Pos: pos, Ctx: ctx}
-		}
-		if in.fb == nil {
-			return NilV(), &RunError{Msg: "TypeError: 先 qkcleg_create", Pos: pos, Ctx: ctx}
-		}
-		in.fb.fillPixels(rgb(byte(args[0].Int()), byte(args[1].Int()), byte(args[2].Int())))
-		return NilV(), nil
-	}
-	in.builtins["qkcleg_rect"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
-		if len(args) != 7 {
-			return NilV(), &RunError{Msg: "TypeError: qkcleg_rect(x,y,w,h,r,g,b)", Pos: pos, Ctx: ctx}
-		}
-		if in.fb == nil {
-			return NilV(), &RunError{Msg: "TypeError: 先 qkcleg_create", Pos: pos, Ctx: ctx}
-		}
-		in.fb.fillRect(int(args[0].Int()), int(args[1].Int()), int(args[2].Int()), int(args[3].Int()),
-			rgb(byte(args[4].Int()), byte(args[5].Int()), byte(args[6].Int())))
-		return NilV(), nil
-	}
-	in.builtins["qkcleg_text_ex"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
-		if len(args) != 8 || !args[6].IsStr() {
-			return NilV(), &RunError{Msg: "TypeError: qkcleg_text_ex(x,y,size,r,g,b,text,fontChain)", Pos: pos, Ctx: ctx}
-		}
-		if in.fb == nil {
-			return NilV(), &RunError{Msg: "TypeError: 先 qkcleg_create", Pos: pos, Ctx: ctx}
-		}
-		chain := "monospace"
-		if args[7].IsStr() {
-			chain = args[7].Str()
-		}
-		in.fb.drawTextChain(int(args[0].Int()), int(args[1].Int()), args[6].Str(), int(args[2].Int()),
-			rgb(byte(args[3].Int()), byte(args[4].Int()), byte(args[5].Int())), chain)
-		return NilV(), nil
-	}
-	in.builtins["qkcleg_roundrect"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
-		if len(args) != 8 {
-			return NilV(), &RunError{Msg: "TypeError: qkcleg_roundrect(x,y,w,h,radius,r,g,b)", Pos: pos, Ctx: ctx}
-		}
-		if in.fb == nil {
-			return NilV(), &RunError{Msg: "TypeError: 先 qkcleg_create", Pos: pos, Ctx: ctx}
-		}
-		in.fb.fillRoundRect(int(args[0].Int()), int(args[1].Int()), int(args[2].Int()), int(args[3].Int()), int(args[4].Int()),
-			rgb(byte(args[5].Int()), byte(args[6].Int()), byte(args[7].Int())))
-		return NilV(), nil
-	}
-	in.builtins["qkcleg_text"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
-		if len(args) != 7 || !args[6].IsStr() {
-			return NilV(), &RunError{Msg: "TypeError: qkcleg_text(x,y,size,r,g,b,String)", Pos: pos, Ctx: ctx}
-		}
-		if in.fb == nil {
-			return NilV(), &RunError{Msg: "TypeError: 先 qkcleg_create", Pos: pos, Ctx: ctx}
-		}
-		in.fb.drawText(int(args[0].Int()), int(args[1].Int()), args[6].Str(), int(args[2].Int()),
-			rgb(byte(args[3].Int()), byte(args[4].Int()), byte(args[5].Int())))
-		return NilV(), nil
-	}
-	in.builtins["qkcleg_frame"] = func(args []Value, pos Pos, ctx *execCtx) (Value, error) {
-		if len(args) != 1 || !args[0].IsStr() {
-			return NilV(), &RunError{Msg: "TypeError: qkcleg_frame(path String)", Pos: pos, Ctx: ctx}
-		}
-		if in.fb == nil {
-			return NilV(), &RunError{Msg: "TypeError: 先 qkcleg_create", Pos: pos, Ctx: ctx}
-		}
-		if err := in.fb.savePNG(args[0].Str()); err != nil {
-			return NilV(), &RunError{Msg: "IOError: " + err.Error(), Pos: pos, Ctx: ctx}
-		}
-		return NilV(), nil
-	}
 }
 
 // qkjsonFromGo 把 json.Unmarshal 结果转为 Value（HashTable / List / 标量；整数值视作 int）。

@@ -208,34 +208,3 @@ func BenchmarkStringProcessing1M(b *testing.B) {
 		})
 	}
 }
-
-// cleg 光栅性能基准（极限路径）
-func BenchmarkClegRaster(b *testing.B) {
-	fb := &framebuffer{}
-	fb.reset(1280, 800)
-	b.Run("fill4K", func(b *testing.B) {
-		fb.reset(3840, 2160)
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			fb.fillPixels(rgb(30, 34, 46))
-		}
-	})
-	b.Run("rect1M", func(b *testing.B) {
-		fb.reset(1280, 800)
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			for x := 0; x < 100; x++ {
-				fb.fillRect(x*10, 100, 8, 6, 0xF0F0F0)
-			}
-		}
-	})
-	b.Run("text1k", func(b *testing.B) {
-		fb.reset(1280, 800)
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			for row := 0; row < 20; row++ {
-				fb.drawText(20, row*30, "QuarkLang CLEG HELLO 0123456789", 2, 0xFFFFFF)
-			}
-		}
-	})
-}

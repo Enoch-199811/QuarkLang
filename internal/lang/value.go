@@ -427,6 +427,25 @@ func (h *HashTable) Remove(k Value) { delete(h.m, hashKey(k)) }
 // Size returns the number of entries.
 func (h *HashTable) Size() int { return len(h.m) }
 
+// Keys 返回键列表（String 键重建；其他类型按 "类型名:值" 前缀重建）。
+func (h *HashTable) Keys() []Value {
+	out := make([]Value, 0, len(h.m))
+	for k := range h.m {
+		if i := len("String:"); len(k) > i && k[:i] == "String:" {
+			out = append(out, StrV(k[i:]))
+			continue
+		}
+		if i := len("int:"); len(k) > i && k[:i] == "int:" {
+			if n, err := strconv.Atoi(k[i:]); err == nil {
+				out = append(out, IntV(int64(n)))
+			}
+			continue
+		}
+		out = append(out, StrV(k))
+	}
+	return out
+}
+
 // hashKey builds a stable structural key for any Value.
 func hashKey(v Value) string { return v.TypeName() + ":" + v.String() }
 

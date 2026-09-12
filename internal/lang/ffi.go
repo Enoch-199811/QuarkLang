@@ -84,6 +84,8 @@ func ffiCall(fn unsafe.Pointer, paramTypes []int, nums []float64, ptrs []unsafe.
 // dlopenLib 加载系统库（跨系统库名解析：原名 → libX.so.6/.so/.dylib/.dll）。
 func dlopenLib(name string) (*libHandle, error) {
 	cands := []string{name}
+	// 项目本地（产物树/assets）："./libX.so" / "./X.so" 优先于系统路径
+	cands = append(cands, "./"+name, "./lib"+name+".so")
 	if !strings.ContainsAny(name, "/.") && !strings.HasPrefix(name, "lib") &&
 		!strings.HasSuffix(name, ".dll") && !strings.HasSuffix(name, ".dylib") {
 		// 裸短名：按平台补位尝试

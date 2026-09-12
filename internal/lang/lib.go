@@ -113,40 +113,51 @@ func CompileWithImports(src, filename string) (*Program, error) {
 	if filename != "" {
 		dir = filepath.Dir(filename)
 	}
-	// 先 Parse（不 Typecheck）提取 import 列表：import 的符号在合并前不存在，
-	// 直接 Compile(src) 会误报 undeclared function。
-	toks, err := Lex(src)
-	if err != nil {
-		return nil, err
-	}
-	macros, rest, err := SplitMacroDefs(toks)
-	if err != nil {
-		return nil, err
-	}
-	if len(macros) > 0 {
-		rest, err = ExpandMacros(rest, macros, "explain")
-		if err != nil {
-			return nil, err
-		}
-	}
-	prog, err := Parse(rest)
-	if err != nil {
-		return nil, err
-	}
-	if len(prog.Imports) == 0 {
-		return Compile(src)
-	}
 	var merged strings.Builder
 	merged.WriteString(src)
 	merged.WriteString("\n")
-	for _, imp := range prog.Imports {
-		imported, err := LoadImport(dir, imp)
+	visited := map[string]bool{}
+	// 递归合并：处理主文件与各库文件中的 import（visited 防环）
+	var collect func(text, base string) error
+	collect = func(text, base string) error {
+		toks, err := Lex(text)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		// 库的 program 声明不参与合并：主程序的 program 才决定程序形态
-		merged.WriteString(stripProgramDecl(imported))
-		merged.WriteString("\n")
+		macros, rest, err := SplitMacroDefs(toks)
+		if err != nil {
+			return err
+		}
+		if len(macros) > 0 {
+			rest, err = ExpandMacros(rest, macros, "explain")
+			if err != nil {
+				return err
+			}
+		}
+		prog, err := Parse(rest)
+		if err != nil {
+			return err
+		}
+		for _, imp := range prog.Imports {
+			key := base + "|" + imp
+			if visited[key] {
+				continue
+			}
+			visited[key] = true
+			imported, err := LoadImport(base, imp)
+			if err != nil {
+				return err
+			}
+			merged.WriteString(stripProgramDecl(imported))
+			merged.WriteString("\n")
+			if err := collect(imported, base); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := collect(src, dir); err != nil {
+		return nil, err
 	}
 	return Compile(merged.String())
 }
